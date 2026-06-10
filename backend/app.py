@@ -8,6 +8,7 @@ from flask_jwt_extended import (
 )
 
 from functools import wraps
+from datetime import datetime, timedelta
 
 # Initialize the Flask application
 app = Flask(__name__)
@@ -109,6 +110,226 @@ def test_admin_dashboard():
         "msg": f"Welcome to the highly secure Admin Dashboard, {current_user.email}!"
     }), 200
 
+@app.route('/admin/staff', methods=['POST'])
+@role_required(['admin']) # Only Admins can hit this endpoint
+def create_staff():
+    data = request.get_json()
+    
+    # 1. Validate Input
+    required_fields = ['email', 'password', 'name', 'contact_details']
+    for field in required_fields:
+        if not data or field not in data:
+            return jsonify({"msg": f"Missing required field: {field}"}), 400
+            
+    # 2. Check if user already exists
+    if User.query.filter_by(email=data['email']).first():
+        return jsonify({"msg": "A user with this email already exists"}), 409
+        
+    # 3. Create the Base User (The Login Credentials)
+    hashed_password = generate_password_hash(data['password'])
+    new_user = User(
+        email=data['email'],
+        password=hashed_password,
+        role='staff', # Hardcoded to 'staff' so Admins can't accidentally create other Admins
+        is_active=True
+    )
+    
+    db.session.add(new_user)
+    
+    # 4. Flush to generate the ID
+    db.session.flush() 
+    
+    # 5. Create the Linked Profile using the new ID
+    new_profile = StaffProfile(
+        user_id=new_user.id,
+        name=data['name'],
+        contact_details=data['contact_details']
+    )
+    
+    db.session.add(new_profile)
+    
+    # 6. Lock it in!
+    db.session.commit()
+    
+    return jsonify({
+        "msg": "Staff account created successfully!", 
+        "staff_id": new_user.id
+    }), 201
+
+@app.route('/admin/trek', methods=['POST'])
+@role_required(['admin'])
+def create_trek():
+    data = request.get_json()
+
+    # 1. Validate Core Input
+    required_fields = ['name', 'location', 'difficulty', 'duration', 'available_slots', 'start_date', 'end_date']
+    for field in required_fields:
+        if not data or field not in data:
+            return jsonify({"msg": f"Missing required field: {field}"}), 400
+
+    # 2. Translate Strings to Date Objects
+    try:
+        start_d = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
+        end_d = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({"msg": "Invalid date format. Please use YYYY-MM-DD"}), 400
+
+    # .get() is safe! If they don't provide a staff ID yet, it just defaults to None
+    staff_id = data.get('assigned_staff_id')
+
+    # ==========================================
+    # 3. THE COLLISION BOX (10-Day Buffer Logic)
+    # ==========================================
+
+    if staff_id:
+        buffer_days = timedelta(days=10)
+        shadow_start = start_d - buffer_days
+        shadow_end = end_d + buffer_days
+
+        # Query the database for overlapping schedules
+        overlapping_trek = Trek.query.filter(
+            Trek.assigned_staff_id == staff_id,
+            Trek.status != 'Cancelled',      # Don't let cancelled treks block the schedule
+            Trek.end_date >= shadow_start,   # Existing trek ends after our shadow begins
+            Trek.start_date <= shadow_end    # Existing trek begins before our shadow ends
+        ).first()
+
+        if overlapping_trek:
+            return jsonify({
+                "msg": f"Schedule Conflict: Staff is assigned to '{overlapping_trek.name}' ({overlapping_trek.start_date} to {overlapping_trek.end_date}). Violates 10-day buffer."
+            }), 409
+
+    # ==========================================
+    # 4. Build and Save the Trek
+    # ==========================================
+        
+    # If a staff_id exists, status is Approved. Otherwise, it stays Pending.
+    calculated_status = 'Approved' if staff_id else 'Pending' 
+    
+    new_trek = Trek(
+        name=data['name'],
+        location=data['location'],
+        difficulty=data['difficulty'],
+        duration=data['duration'],
+        available_slots=data['available_slots'],
+        start_date=start_d,
+        end_date=end_d,
+        assigned_staff_id=staff_id,
+        status=calculated_status # We explicitly override the default here!
+    )
+
+    db.session.add(new_trek)
+
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback() # If the name isn't unique, safely cancel the save
+        return jsonify({"msg": "Error: Trek name might already exist."}), 409
+
+    return jsonify({
+        "msg": f"Trek created successfully with status: {calculated_status}", 
+        "trek_id": new_trek.id
+    }), 201
+
+
+@app.route('/admin/available-staff', methods=['GET'])
+@role_required(['admin'])
+def get_available_staff():
+    # 1. Grab dates from the URL query parameters
+    start_date_str = request.args.get('start_date')
+    end_date_str = request.args.get('end_date')
+    
+    if not start_date_str or not end_date_str:
+        return jsonify({"msg": "Missing start_date or end_date parameters"}), 400
+        
+    # 2. Parse the Dates
+    try:
+        start_d = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+        end_d = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({"msg": "Invalid date format. Use YYYY-MM-DD"}), 400
+        
+    # 3. Calculate the Shadow
+    buffer_days = timedelta(days=10)
+    shadow_start = start_d - buffer_days
+    shadow_end = end_d + buffer_days
+    
+    # 4. Find the Busy Staff (The Exclusion List)
+    overlapping_treks = Trek.query.filter(
+        Trek.status != 'Cancelled',
+        Trek.end_date >= shadow_start,
+        Trek.start_date <= shadow_end,
+        Trek.assigned_staff_id.isnot(None) # Only check treks that actually have staff
+    ).all()
+    
+    # Create a simple list of busy IDs (e.g., [2, 5, 8])
+    busy_staff_ids = [trek.assigned_staff_id for trek in overlapping_treks]
+    
+    # 5. Find the Available Staff
+    # We query StaffProfile so we can easily return their names to the frontend
+    available_staff_query = StaffProfile.query.filter(StaffProfile.status == 'Active')
+    
+    if busy_staff_ids:
+        # The ~ symbol means "NOT". Give me staff NOT in the busy list.
+        available_staff_query = available_staff_query.filter(~StaffProfile.user_id.in_(busy_staff_ids))
+        
+    available_staff = available_staff_query.all()
+    
+    # 6. Format the Data for the Frontend Dropdown
+    results = [
+        {"staff_id": staff.user_id, "name": staff.name}
+        for staff in available_staff
+    ]
+    
+    return jsonify({
+        "available_count": len(results),
+        "staff": results
+    }), 200
+
+@app.route('/admin/staffs', methods=['GET'])
+@role_required(['admin'])
+def get_all_staff():
+    staff_list = StaffProfile.query.all()
+
+    results = [
+        {
+            "id": staff.id,
+            "user_id": staff.user_id,
+            "name": staff.name,
+            "contact_details": staff.contact_details,
+            "status": staff.status
+        } for staff in staff_list
+    ]
+
+    return jsonify(results), 200
+
+@app.route('/admin/treks', methods=['GET'])
+@role_required(['admin'])
+def get_all_treks():
+    treks = Trek.query.all()
+
+    results = []
+
+    for trek in treks:
+        manager_name = "Unassigned"
+        if trek.manager and trek.manager.staff_profile:
+            manager_name = trek.manager.staff_profile.name
+
+        results.append({
+            "id": trek.id,
+            "name": trek.name,
+            "location": trek.location,
+            "difficulty": trek.difficulty,
+            "duration": trek.duration,
+            "available_slots": trek.available_slots,
+            # Translate the Python Date objects back into readable strings for the frontend
+            "start_date": trek.start_date.strftime('%Y-%m-%d'),
+            "end_date": trek.end_date.strftime('%Y-%m-%d'),
+            "status": trek.status,
+            "assigned_staff": manager_name
+        })
+
+    return jsonify(results), 200
 
 
 # Start the local development server
