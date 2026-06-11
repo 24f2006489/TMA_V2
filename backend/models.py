@@ -13,6 +13,9 @@ class User(db.Model):
     role = db.Column(db.String(10), nullable=False)
     is_active = db.Column(db.Boolean, default=True)
 
+    # Relationship link to Trekker profile
+    trekker_profile = db.relationship('TrekkerProfile', backref='user', uselist=False)
+
     # Relationship link to staff profile
     staff_profile = db.relationship('StaffProfile', backref='user', uselist=False)
 
@@ -21,6 +24,15 @@ class User(db.Model):
 
     # The Relationship Link to Bookings (One-to-Many: One user has many bookings)
     bookings = db.relationship('Booking', backref='user', lazy=True)
+
+class TrekkerProfile(db.Model):
+    __tablename__ = 'trekker_profile'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), unique=True, nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    contact_details = db.Column(db.String(255), nullable=False)
+    emergency_contact = db.Column(db.String(255), nullable=False) 
 
 class StaffProfile(db.Model):
     __tablename__ = 'staff_profile'

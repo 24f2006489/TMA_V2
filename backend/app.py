@@ -1,10 +1,9 @@
 from flask import Flask, request, jsonify
-from models import db, User, Trek, StaffProfile, Booking
 from werkzeug.security import generate_password_hash, check_password_hash
-
+from models import db, User, Trek, StaffProfile, TrekkerProfile, Booking
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, 
-    get_jwt, current_user, verify_jwt_in_request
+    get_jwt, current_user, verify_jwt_in_request, get_jwt_identity
 )
 
 from functools import wraps
@@ -102,6 +101,69 @@ def login():
             "role": user.role
         }), 200
     return jsonify({"msg": "Invalid credentials"}), 401
+
+@app.route('/register', methods=['POST'])
+def register_trekker():
+    data = request.get_json()
+
+    required_fields = ['email', 'password', 'name', 'contact_details', 'emergency_contact']
+    for field in required_fields:
+        if not data or field not in data:
+            return jsonify({"msg": f"Missing required field: {field}"}), 400
+
+    if User.query.filter_by(email=data['email']).first():
+        return jsonify({"msg": "Email already registered"}), 409
+
+    hashed_password = generate_password_hash(data['password'])
+    new_user = User(
+        email=data['email'],
+        password=hashed_password,
+        role='trekker',
+        is_active=True
+    )
+
+    db.session.add(new_user)
+    db.session.flush()
+
+    new_profile = TrekkerProfile(
+        user_id=new_user.id,
+        name=data['name'],
+        contact_details=data['contact_details'],
+        emergency_contact=data['emergency_contact']
+    )
+
+    db.session.add(new_profile)
+    db.session.commit()
+
+    return jsonify({
+        "msg": "Registration successful! You can now log in.", 
+        "user_id": new_user.id
+    }), 201
+
+@app.route('/treks/available', methods=['GET'])
+def view_open_treks():
+    open_treks = Trek.query.filter(
+        Trek.status=='Approved',
+        Trek.available_slots > 0
+    ).all()
+
+    results = []
+    for trek in open_treks:
+        results.append({
+            "id": trek.id,
+            "name": trek.name,
+            "location":trek.location,
+            "difficulty":trek.difficulty,
+            "duration":trek.duration,
+            "available_slots":trek.available_slots,
+            "start_date":trek.start_date.strftime('%Y-%m-%d'),
+            "end_date":trek.end_date.strftime('%Y-%m-%d')
+        })
+
+    return jsonify({
+        "count": len(results),
+        "treks": results
+    }), 200
 
 @app.route('/admin-dashboard', methods=['GET', 'POST'])
 @role_required(['admin'])
@@ -330,6 +392,101 @@ def get_all_treks():
         })
 
     return jsonify(results), 200
+
+@app.route('/book', methods=['POST'])
+@role_required(['trekker']) # ONLY trekkers can hit this route!
+def book_trek():
+    data = request.get_json()
+    trek_id = data.get('trek_id')
+    
+    if not trek_id:
+        return jsonify({"msg": "Please provide a trek_id to book"}), 400
+        
+    # 1. Securely identify WHO is making the request using their Token
+    user_id = int(get_jwt_identity()) 
+    
+    # 2. Find the requested Trek
+    target_trek = Trek.query.get(trek_id)
+    if not target_trek:
+        return jsonify({"msg": "Trek not found"}), 404
+        
+    if target_trek.status != 'Open':
+        return jsonify({"msg": "This trek is not currently open for booking"}), 400
+        
+    if target_trek.available_slots <= 0:
+        return jsonify({"msg": "Sorry, this trek is fully booked!"}), 400
+        
+    # ==========================================
+    # 3. EDGE CASE 1: Prevent Double Booking
+    # ==========================================
+    existing_booking = Booking.query.filter_by(user_id=user_id, trek_id=trek_id).first()
+    if existing_booking:
+        return jsonify({"msg": "You have already booked a ticket for this trek!"}), 409
+        
+    # ==========================================
+    # 4. EDGE CASE 2: Prevent Overlapping Dates
+    # ==========================================
+    # We join the Trek and Booking tables to find existing trips for this specific user
+    overlapping_trek = Trek.query.join(Booking).filter(
+        Booking.user_id == user_id,
+        Trek.end_date > target_trek.start_date, # Existing ends AFTER new one starts
+        Trek.start_date < target_trek.end_date  # Existing starts BEFORE new one ends
+    ).first()
+    
+    if overlapping_trek:
+        return jsonify({
+            "msg": f"Date overlap! You are already booked for '{overlapping_trek.name}' from {overlapping_trek.start_date} to {overlapping_trek.end_date}."
+        }), 409
+
+    # ==========================================
+    # 5. Execute the Transaction
+    # ==========================================
+    new_booking = Booking(user_id=user_id, trek_id=trek_id)
+    
+    # Inventory Management: Decrease available slots by 1
+    target_trek.available_slots -= 1 
+    
+    db.session.add(new_booking)
+    
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"msg": "A database error occurred during booking."}), 500
+    
+    return jsonify({
+        "msg": f"Successfully booked your slot for {target_trek.name}!",
+        "remaining_slots": target_trek.available_slots
+    }), 201
+
+
+@app.route('/trekker/my-booking', methods=['GET'])
+@role_required(['trekker'])
+def get_my_booking():
+    user_id = int(get_jwt_identity())
+
+    my_bookings = Booking.query.filter_by(user_id=user_id).all()
+
+    results = []
+    for booking in my_bookings:
+        # Thanks to the 'backref' in models.py, we can just say booking.trek!
+        trek  = booking.trek
+
+        results.append({
+            "booking_id": booking.id,
+            "trek_id": trek.id,
+            "trek_name": trek.name,
+            "location": trek.location,
+            "start_date": trek.start_date.strftime('%Y-%m-%d'),
+            "end_date": trek.end_date.strftime('%Y-%m-%d'),
+            "duration": trek.duration
+        })
+
+    return jsonify({
+        "total_bookings": len(results),
+        "bookings": results
+    }), 200
+
 
 
 # Start the local development server
