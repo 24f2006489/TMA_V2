@@ -140,30 +140,9 @@ def register_trekker():
         "user_id": new_user.id
     }), 201
 
-@app.route('/treks/available', methods=['GET'])
-def view_open_treks():
-    open_treks = Trek.query.filter(
-        Trek.status=='Approved',
-        Trek.available_slots > 0
-    ).all()
-
-    results = []
-    for trek in open_treks:
-        results.append({
-            "id": trek.id,
-            "name": trek.name,
-            "location":trek.location,
-            "difficulty":trek.difficulty,
-            "duration":trek.duration,
-            "available_slots":trek.available_slots,
-            "start_date":trek.start_date.strftime('%Y-%m-%d'),
-            "end_date":trek.end_date.strftime('%Y-%m-%d')
-        })
-
-    return jsonify({
-        "count": len(results),
-        "treks": results
-    }), 200
+# ==========================================
+# ADMIN ROUTES
+# ==========================================
 
 @app.route('/admin-dashboard', methods=['GET', 'POST'])
 @role_required(['admin'])
@@ -393,6 +372,35 @@ def get_all_treks():
 
     return jsonify(results), 200
 
+# ==========================================
+# TREKKERS ROUTES 
+# ==========================================
+
+@app.route('/treks/available', methods=['GET'])
+def view_open_treks():
+    open_treks = Trek.query.filter(
+        Trek.status=='Open',
+        Trek.available_slots > 0
+    ).all()
+
+    results = []
+    for trek in open_treks:
+        results.append({
+            "id": trek.id,
+            "name": trek.name,
+            "location":trek.location,
+            "difficulty":trek.difficulty,
+            "duration":trek.duration,
+            "available_slots":trek.available_slots,
+            "start_date":trek.start_date.strftime('%Y-%m-%d'),
+            "end_date":trek.end_date.strftime('%Y-%m-%d')
+        })
+
+    return jsonify({
+        "count": len(results),
+        "treks": results
+    }), 200
+
 @app.route('/book', methods=['POST'])
 @role_required(['trekker']) # ONLY trekkers can hit this route!
 def book_trek():
@@ -487,6 +495,115 @@ def get_my_booking():
         "bookings": results
     }), 200
 
+# ==========================================
+# STAFF ROUTES (Phase 6)
+# ==========================================
+@app.route('/staff/my-treks', methods=['GET'])
+@role_required(['staff'])
+def get_my_assigned_trek():
+    user_id = int(get_jwt_identity())
+
+    assigned_treks = Trek.query.filter_by(assigned_staff_id=user_id).all()
+
+    results = []
+    for trek in assigned_treks:
+        # We also want to calculate how many people have booked this trek
+        # len(trek.bookings) counts the number of booking records attached to this trek
+        booked_count = len(trek.bookings)
+        results.append({
+            "trek_id": trek.id,
+            "name": trek.name,
+            "location": trek.location,
+            "difficulty": trek.difficulty,
+            "duration": trek.duration,
+            "total_capacity": trek.available_slots + booked_count, # Math to find original capacity
+            "slots_remaining": trek.available_slots,
+            "currently_booked": booked_count,
+            "start_date": trek.start_date.strftime('%Y-%m-%d'),
+            "end_date": trek.end_date.strftime('%Y-%m-%d'),
+            "status": trek.status
+        })
+
+    return jsonify({
+        "total_assigned": len(results),
+        "treks": results
+    }), 200
+
+@app.route('/staff/trek/<int:trek_id>/status', methods=['PUT'])
+@role_required(['staff'])
+def update_trek_status(trek_id):
+    data = request.get_json()
+    new_status = data.get('status')
+    
+    # 1. Validate Input
+    # Staff shouldn't be able to revert a trek to "Pending" (that means no staff is assigned)
+    allowed_statuses = ['Approved', 'Open', 'Closed', 'Completed']
+    if not new_status or new_status not in allowed_statuses:
+        return jsonify({"msg": f"Invalid status. Must be one of: {allowed_statuses}"}), 400
+        
+    # 2. Identify the Staff Member
+    staff_id = int(get_jwt_identity())
+    
+    # 3. Find the Trek
+    trek = Trek.query.get(trek_id)
+    if not trek:
+        return jsonify({"msg": "Trek not found"}), 404
+        
+    # ==========================================
+    # 4. THE SECURITY FORTRESS (Ownership Check)
+    # ==========================================
+    if trek.assigned_staff_id != staff_id:
+        return jsonify({"msg": "Unauthorized: You do not have permission to modify this trek."}), 403
+        
+    # 5. Update and Save
+    trek.status = new_status
+    
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"msg": "Database error occurred."}), 500
+        
+    return jsonify({
+        "msg": f"Successfully updated trek status to {new_status}",
+        "trek_id": trek.id,
+        "new_status": trek.status
+    }), 200
+
+@app.route('/staff/trek/<int:trek_id>/participants', methods=['GET'])
+@role_required(['staff'])
+def get_trek_participants(trek_id):
+    staff_id = int(get_jwt_identity())
+
+    trek = Trek.query.get(trek_id)
+    if not trek:
+        return jsonify({"msg": "Trek not found"}), 404
+
+    if trek.assigned_staff_id != staff_id:
+        return jsonify({"msg": "Unauthorized: You can only view participants for your own assigned treks."}), 403
+
+    participants = []
+    for booking in trek.bookings:
+        trekker_profile = booking.user.trekker_profile
+
+        name = trekker_profile.name if trekker_profile else "Unknown"
+        name = trekker_profile.name if trekker_profile else "Unknown"
+        contact = trekker_profile.contact_details if trekker_profile else "N/A"
+        emergency = trekker_profile.emergency_contact if trekker_profile else "N/A"
+
+        participants.append({
+            "booking_id": booking.id,
+            "trekker_id": booking.user_id,
+            "name": name,
+            "contact_details": contact,
+            "emergency_contact": emergency
+        })
+        
+    return jsonify({
+        "trek_name": trek.name,
+        "total_participants": len(participants),
+        "participants": participants
+    }), 200
 
 
 # Start the local development server
