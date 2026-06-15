@@ -93,6 +93,9 @@ def login():
 
     user = User.query.filter_by(email=data['email']).first()
 
+    if user and not user.is_active:
+        return jsonify({"msg": "This account has been deactivated. Please contact support."}), 403
+
     if user and check_password_hash(user.password, data['password']):
         access_token = create_access_token(identity=user, additional_claims={"role": user.role})
         return jsonify({
@@ -151,6 +154,21 @@ def test_admin_dashboard():
         "msg": f"Welcome to the highly secure Admin Dashboard, {current_user.email}!"
     }), 200
 
+@app.route('/admin/dashboard/stats', methods=['GET'])
+@role_required(['admin'])
+def get_admin_stats():
+    total_trekkers = User.query.filter_by(role='trekker').count()
+    total_staff = User.query.filter_by(role='staff').count()
+    total_treks = Trek.query.count()
+    total_bookings = Booking.query.count()
+    
+    return jsonify({
+        "total_trekkers": total_trekkers,
+        "total_staff": total_staff,
+        "total_treks": total_treks,
+        "total_bookings": total_bookings
+    }), 200
+
 @app.route('/admin/staff', methods=['POST'])
 @role_required(['admin']) # Only Admins can hit this endpoint
 def create_staff():
@@ -196,6 +214,62 @@ def create_staff():
         "msg": "Staff account created successfully!", 
         "staff_id": new_user.id
     }), 201
+
+
+
+
+@app.route('/admin/staff/<int:staff_id>', methods=['DELETE'])
+@role_required(['admin'])
+def delete_staff(staff_id):
+    target_user = User.query.get(staff_id)
+    
+    if not target_user or target_user.role != 'staff':
+        return jsonify({"msg": "Staff member not found."}), 404
+        
+    # 1. Fetch all active treks assigned to this staff member
+    active_treks = Trek.query.filter(
+        Trek.assigned_staff_id == staff_id,
+        Trek.status.in_(['Approved', 'Open', 'Closed'])
+    ).all()
+    
+    # ==========================================
+    # 2. THE BOOKING SHIELD (Validation Pass)
+    # ==========================================
+    # If even ONE trek has a booking, the entire deletion is blocked.
+    for trek in active_treks:
+        if len(trek.bookings) > 0:
+            return jsonify({
+                "msg": f"Action Denied: Cannot delete this staff member. The trek '{trek.name}' they are assigned to already has {len(trek.bookings)} booking(s)."
+            }), 400
+            
+    # ==========================================
+    # 3. THE CASCADE REVERT (Mutation Pass)
+    # ==========================================
+    # If we made it past the shield, it means 0 bookings exist.
+    # We detach the staff and revert the treks to the empty 'Pending' state.
+    for trek in active_treks:
+        trek.assigned_staff_id = None
+        trek.status = 'Pending'
+        
+    # 4. Safe to Delete the Staff Member
+    profile = target_user.staff_profile
+    if profile:
+        db.session.delete(profile)
+        
+    db.session.delete(target_user)
+    
+    # 5. Commit everything simultaneously
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"msg": "Database error occurred during deletion."}), 500
+    
+    return jsonify({
+        "msg": f"Staff member successfully deleted. {len(active_treks)} trek(s) have been reverted to 'Pending'."
+    }), 200
+
+
 
 @app.route('/admin/trek', methods=['POST'])
 @role_required(['admin'])
@@ -272,6 +346,101 @@ def create_trek():
         "trek_id": new_trek.id
     }), 201
 
+@app.route('/admin/trek/<int:trek_id>', methods=['DELETE'])
+@role_required(['admin'])
+def delete_trek(trek_id):
+    trek = Trek.query.get(trek_id)
+
+    if not trek:
+        return jsonify({"msg": "Trek not found."}), 404
+
+    # Prevent deletion if bookings exist
+    if len(trek.bookings) > 0:
+        return jsonify({
+            "msg": f"Action Denied: Cannot delete '{trek.name}' because {len(trek.bookings)} trekkers have already booked it. Please cancel the trek instead."
+        }), 400
+
+    db.session.delete(trek)
+    db.session.commit()
+
+    return jsonify({"msg": f"Trek '{trek.name}' has been successfully deleted."}), 200
+
+@app.route('/admin/trek/<int:trek_id>', methods=['PUT'])
+@role_required(['admin'])
+def update_trek(trek_id):
+    trek = Trek.query.get(trek_id)
+
+    if not trek:
+        return jsonify({"msg": "Trek not found."}), 404
+
+    data = request.get_json()
+
+    has_bookings = len(trek.bookings) > 0
+
+    # 1. ALWAYS ALLOWED (Superficial changes)
+    if 'name' in data:
+        trek.name = data['name']
+    if 'difficulty' in data:
+        trek.difficulty = data['difficulty']
+
+    # 2. CONDITIONAL CHANGES (Core details)
+    # Check if the admin is trying to change a restricted field
+    restricted_fields = ['location', 'duration', 'start_date', 'end_date']
+    attempting_restricted_update = any(field in data for field in restricted_fields)
+
+    if has_bookings and attempting_restricted_update:
+        return jsonify({
+            "msg": "Action Denied: You cannot change the location or dates of this trek because users have already booked it. You may only fix typos in the name or difficulty."
+        }), 400
+
+    # if there are no booking, apply the core change
+    if not has_bookings:
+        if 'location' in data:
+            trek.location = data['location']
+        if 'duration' in data:
+            trek.duration = data['duration']
+
+        try:
+            if 'start_date' in data:
+                trek.start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
+            if 'end_date' in data:
+                trek.end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({"msg": "Invalid date format. Please use YYYY-MM-DD"}), 400
+        db.session.commit()
+    
+    return jsonify({
+        "msg": f"Trek '{trek.name}' updated successfully.",
+        "has_bookings": has_bookings
+    }), 200
+
+@app.route('/admin/trek/<int:trek_id>/cancel', methods=['PUT'])
+@role_required(['admin'])
+def emergency_cancel_trek(trek_id):
+    trek = Trek.query.get(trek_id)
+
+    if not trek:
+        return jsonify({"msg": "Trek not found"}), 404
+
+    if trek.status == 'Canceled':
+        return jsonify({"msg": "This trek is already canceled."}), 400
+
+    # 1. Change the status
+    trek.status = 'Canceled'
+
+    # 2. Free up the Staff Member!
+    # By setting this to None, Rohit's 10-day buffer is instantly cleared for these dates.
+    freed_staff = trek.assigned_staff_id
+    trek.assigned_staff_id = None
+
+    db.session.commit()
+
+    return jsonify({
+        "msg": f"EMERGENCY OVERRIDE: Trek '{trek.name}' has been officially cancelled.",
+        "freed_staff_id": freed_staff,
+        "new_status": trek.status
+    }), 200
+
 
 @app.route('/admin/available-staff', methods=['GET'])
 @role_required(['admin'])
@@ -327,10 +496,70 @@ def get_available_staff():
         "staff": results
     }), 200
 
+# This route is to assign staff to existing trek
+@app.route('/admin/trek/<int:trek_id>/assign', methods=['PUT'])
+@role_required(['admin'])
+def assign_staff_to_trek(trek_id):
+    data = request.get_json()
+    new_staff_id = data.get('staff_id')
+
+    if not new_staff_id:
+        return jsonify({"msg": "Please provide a staff_id to assign."}), 400
+
+    trek = Trek.query.get(trek_id)
+    if not trek:
+        return jsonify({"msg": "Trek not found."}), 404
+
+    target_staff = User.query.get(new_staff_id)
+    if not target_staff or target_staff.role != 'staff':
+        return jsonify({"msg": "Valid staff member not found."}), 404
+
+    buffer_days = timedelta(days=10)
+    shadow_start = trek.start_date - buffer_days
+    shadow_end = trek.end_date + buffer_days
+
+    overlapping_trek = Trek.query.filter(
+        Trek.assigned_staff_id == new_staff_id,
+        Trek.status != 'Cancelled',
+        Trek.id != trek.id, # Ignore the current trek in case this is a re-assignment
+        Trek.end_date >= shadow_start,
+        Trek.start_date <= shadow_end
+    ).first()
+
+    if overlapping_trek:
+        return jsonify({
+            "msg": f"Schedule Conflict: Staff is already assigned to '{overlapping_trek.name}' ({overlapping_trek.start_date} to {overlapping_trek.end_date}). Violates 10-day buffer."
+        }), 409
+
+    trek.assigned_staff_id = new_staff_id
+
+    if trek.status == 'Pending':
+        trek.status = 'Approved'
+
+    db.session.commit()
+
+    return jsonify({
+        "msg": f"Staff member successfully assigned to '{trek.name}'.",
+        "trek_id": trek.id,
+        "assigned_staff_id": trek.assigned_staff_id,
+        "new_status": trek.status
+    }), 200
+
+
 @app.route('/admin/staffs', methods=['GET'])
 @role_required(['admin'])
 def get_all_staff():
-    staff_list = StaffProfile.query.all()
+    search_query = request.args.get('search')
+
+    query = StaffProfile.query
+
+    if search_query:
+        if search_query.isdigit(): # if you type a number, then search by ID
+            query = query.filter(StaffProfile.user_id == int(search_query))
+        else: # if you type a word, then search by name
+            query = query.filter(StaffProfile.name.ilike(f"%{search_query}%"))
+
+    staff_list = query.all()
 
     results = [
         {
@@ -342,12 +571,22 @@ def get_all_staff():
         } for staff in staff_list
     ]
 
-    return jsonify(results), 200
+    return jsonify({"count": len(results), "staff": results}), 200
 
 @app.route('/admin/treks', methods=['GET'])
 @role_required(['admin'])
 def get_all_treks():
-    treks = Trek.query.all()
+    search_query = request.args.get()
+
+    query = Trek.query
+    
+    if search_query:
+        if search_query.isdigit():
+            query = query.filter(Trek.id == int(search_query))
+        else:
+            query = query.filter(Trek.name.ilike(f"%{search_query}%"))
+
+    treks = query.all()
 
     results = []
 
@@ -363,37 +602,181 @@ def get_all_treks():
             "difficulty": trek.difficulty,
             "duration": trek.duration,
             "available_slots": trek.available_slots,
-            # Translate the Python Date objects back into readable strings for the frontend
             "start_date": trek.start_date.strftime('%Y-%m-%d'),
             "end_date": trek.end_date.strftime('%Y-%m-%d'),
             "status": trek.status,
             "assigned_staff": manager_name
         })
 
-    return jsonify(results), 200
+    return jsonify({"count": len(results), "treks": results}), 200
+
+@app.route('/admin/trekkers', methods=['GET'])
+@role_required(['admin'])
+def get_all_trekkers():
+    search_query = request.args.get()
+
+    # We must join TrekkerProfile so we can access the 'name' column for searching
+    query = User.query.filter_by(role="trekker").outerjoin(TrekkerProfile)
+
+    if search_query:
+        if search_query.isdigit():
+            query = query.filter(User.id == int(search_query))
+        else:
+            query = query.filter(TrekkerProfile.name.ilike(f"%{search_query}%"))
+
+    trekkers = query.all()
+
+    results = []
+    for user in trekkers:
+        profile = user.trekker_profile
+
+        booking_history = []
+        for booking in user.bookings:
+            booking_history.append({
+                "booking_id": booking.id,
+                "trek_name": booking.trek.name,
+                "start_date": booking.trek.start_date.strftime('%Y-%m-%d'),
+                "status": booking.trek.status
+            })
+
+        results.append({
+            "user_id": user.id,
+            "email": user.email,
+            "name": profile.name if profile else "N/A",
+            "contact_details": profile.contact_details if profile else "N/A",
+            "emergency_contact": profile.emergency_contact if profile else "N/A",
+            "is_active": user.is_active,
+            "total_bookings": len(booking_history),
+            "bookings": booking_history
+        })
+    return jsonify({
+        "total_trekkers": len(results),
+        "trekkers": results
+    }), 200
+
+@app.route('/admin/bookings', methods=['GET'])
+@role_required(['admin'])
+def get_all_global_bookings():
+    all_bookings = Booking.query.all()
+
+    results = []
+    for b in all_bookings:
+        profile = b.user.trekker_profile
+
+        results.append({
+            "booking_id": b.id,
+            "trek_id": b.trek_id,
+            "trek_name": b.trek.name,
+            "trek_start_date": b.trek.start_date.strftime('%Y-%m-%d'),
+            "user_id": b.user_id,
+            "trekker_name": profile.name if profile else "Unknown",
+            "trekker_email": b.user.email
+        })
+    return jsonify({
+        "total_global_booking": len(results),
+        "bookings": results
+    }), 200
+
+@app.route('/admin/user/<int:user_id>/blacklist', methods=['PUT'])
+@role_required(['admin'])
+def toggle_user_status(user_id):
+    target_user = User.query.get(user_id)
+
+    if not target_user:
+        return jsonify({"msg": "User not found"}), 404
+
+    if target_user.role == 'admin':
+        return jsonify({"msg": "Action Denied. Cannot modify Admin status."}), 403
+
+    target_user.is_active = not target_user.is_active
+
+    db.session.commit()
+
+    status_msg = "Activated" if target_user.is_active else "Blacklisted"
+
+    return jsonify({
+        "msg": f"User {target_user.email} is now {status_msg}.",
+        "user_id": target_user.id,
+        "is_active": target_user.is_active
+    }), 200
 
 # ==========================================
 # TREKKERS ROUTES 
 # ==========================================
 
+@app.route('/trekker/profile', methods=['PUT'])
+@role_required(['trekker'])
+def update_trekker_profile():
+    # 1. Identify the Trekker
+    user_id = int(get_jwt_identity())
+    
+    # 2. Fetch their specific profile using the linked user_id
+    profile = TrekkerProfile.query.filter_by(user_id=user_id).first()
+    
+    if not profile:
+        return jsonify({"msg": "Profile not found"}), 404
+        
+    data = request.get_json()
+    
+    if 'name' in data:
+        profile.name = data['name']
+    
+    if 'contact_details' in data:
+        profile.contact_details = data['contact_details']
+        
+    if 'emergency_contact' in data:
+        profile.emergency_contact = data['emergency_contact']
+        
+    # 4. Save Changes
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"msg": "Database error occurred while updating profile."}), 500
+        
+    return jsonify({
+        "msg": "Profile updated successfully!",
+        "contact_details": profile.contact_details,
+        "emergency_contact": profile.emergency_contact
+    }), 200
+
 @app.route('/treks/available', methods=['GET'])
 def view_open_treks():
-    open_treks = Trek.query.filter(
-        Trek.status=='Open',
-        Trek.available_slots > 0
-    ).all()
+    search_location = request.args.get('location')
+    search_difficulty = request.args.get('difficulty')
+    search_duration = request.args.get('duration')
+
+    query = Trek.query.filter(Trek.status == 'Open', Trek.available_slots > 0)
+
+    if search_location:
+        # ilike() makes it case-insensitive. The % symbols act as wildcards.
+        # So "kash" will successfully find "Jammu & Kashmir"
+        query = query.filter(Trek.location.ilike(f"%{search_location}%"))
+
+    if search_difficulty:
+        query = query.filter(Trek.difficulty.ilike(search_difficulty))
+
+    if search_duration:
+        # URL parameters are always strings, so we convert to int for math
+        try:
+            duration_int = int(search_duration)
+            query = query.filter(Trek.duration <= duration_int)
+        except ValueError:
+            pass
+
+    filtered_treks = query.all()
 
     results = []
-    for trek in open_treks:
+    for trek in filtered_treks:
         results.append({
             "id": trek.id,
             "name": trek.name,
-            "location":trek.location,
-            "difficulty":trek.difficulty,
-            "duration":trek.duration,
-            "available_slots":trek.available_slots,
-            "start_date":trek.start_date.strftime('%Y-%m-%d'),
-            "end_date":trek.end_date.strftime('%Y-%m-%d')
+            "location": trek.location,
+            "difficulty": trek.difficulty,
+            "duration": trek.duration,
+            "available_slots": trek.available_slots,
+            "start_date": trek.start_date.strftime('%Y-%m-%d'),
+            "end_date": trek.end_date.strftime('%Y-%m-%d')
         })
 
     return jsonify({
