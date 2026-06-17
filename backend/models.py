@@ -69,7 +69,7 @@ class Booking(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     trek_id = db.Column(db.Integer, db.ForeignKey('trek.id'), nullable=False)
-    
+    status = db.Column(db.String(20), default='Confirmed', nullable=False)
     # Tracking Details
     booking_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -79,5 +79,3 @@ class Booking(db.Model):
     # and every single booking forever would get that exact same timestamp. 
     # By putting lambda: in front, you are handing SQLAlchemy a tiny set of instructions and saying, 
     # "Don't run this now. Run this exact function only when a user actually clicks the book button."
-
-    status = db.Column(db.String(20), default='Booked')

@@ -36,7 +36,7 @@ def user_lookup_callback(_jwt_header, jwt_data):
     return db.session.get(User, int(identity))
 
 # ==========================================
-# 3. SECURITY GUARDS (Custom RBAC Decorator)
+#  SECURITY GUARDS (Custom RBAC Decorator)
 # ==========================================
 def role_required(allowed_roles):
     def wrapper(fn):
@@ -54,35 +54,8 @@ def role_required(allowed_roles):
     return wrapper
 
 
-
-# Database Setup & Admin Injection
-with app.app_context():
-
-    # 1. Create the database file and all tables
-    db.create_all()
-
-    admin_email = 'admin@tma.com'
-    admin_user = User.query.filter_by(email=admin_email).first()
-
-    if not admin_user:
-        hashed_password = generate_password_hash('admin123')
-
-        new_admin = User(
-            email=admin_email,
-            password=hashed_password,
-            role='admin',
-            is_active=True
-        )
-
-        db.session.add(new_admin)
-        db.session.commit()
-        print("✅ Database created and default Admin injected successfully!")
-    else:
-        print("⚡ Database already exists and Admin is ready.")
-
-
 # ==========================================
-# 5. CORE ROUTES
+#  CORE ROUTES
 # ==========================================
 @app.route('/login', methods=['POST'])
 def login():
@@ -215,7 +188,35 @@ def create_staff():
         "staff_id": new_user.id
     }), 201
 
-
+@app.route('/admin/staff/<int:staff_id>', methods=['PUT'])
+@role_required(['admin'])
+def update_staff(staff_id):
+    # 1. Verify the target
+    target_user = User.query.get(staff_id)
+    
+    if not target_user or target_user.role != 'staff':
+        return jsonify({"msg": "Staff member not found."}), 404
+        
+    profile = target_user.staff_profile
+    if not profile:
+        return jsonify({"msg": "Staff profile data is missing."}), 404
+        
+    data = request.get_json()
+    
+    # 2. Apply updates
+    if 'name' in data:
+        profile.name = data['name']
+        
+    if 'contact_details' in data:
+        profile.contact_details = data['contact_details']
+        
+    db.session.commit()
+    
+    return jsonify({
+        "msg": "Staff profile updated successfully.",
+        "name": profile.name,
+        "contact_details": profile.contact_details
+    }), 200
 
 
 @app.route('/admin/staff/<int:staff_id>', methods=['DELETE'])
@@ -576,7 +577,7 @@ def get_all_staff():
 @app.route('/admin/treks', methods=['GET'])
 @role_required(['admin'])
 def get_all_treks():
-    search_query = request.args.get()
+    search_query = request.args.get('search')
 
     query = Trek.query
     
@@ -613,7 +614,7 @@ def get_all_treks():
 @app.route('/admin/trekkers', methods=['GET'])
 @role_required(['admin'])
 def get_all_trekkers():
-    search_query = request.args.get()
+    search_query = request.args.get('search')
 
     # We must join TrekkerProfile so we can access the 'name' column for searching
     query = User.query.filter_by(role="trekker").outerjoin(TrekkerProfile)
@@ -870,7 +871,8 @@ def get_my_booking():
             "location": trek.location,
             "start_date": trek.start_date.strftime('%Y-%m-%d'),
             "end_date": trek.end_date.strftime('%Y-%m-%d'),
-            "duration": trek.duration
+            "duration": trek.duration,
+            "status": trek.status
         })
 
     return jsonify({
@@ -878,9 +880,77 @@ def get_my_booking():
         "bookings": results
     }), 200
 
+@app.route('/trekker/booking/<int:booking_id>', methods=['DELETE'])
+@role_required(['trekker'])
+def cancel_booking(booking_id):
+    user_id = int(get_jwt_identity())
+
+    booking = Booking.query.get(booking_id)
+
+    if not booking:
+        return jsonify({"msg": "Booking not found"}), 404
+
+    if booking.user_id != user_id:
+        return jsonify({"msg": "Unauthorized: You can only cancel your own bookings."}), 403
+
+    if booking.status == 'Cancelled':
+        return jsonify({"msg": "This booking is already cancelled."}), 400
+
+    trek = booking.trek
+
+    if trek.status in ['Completed', 'Cancelled']:
+        return jsonify({"msg": f"Action Denied: This trek is already {trek.status}."}), 400
+
+    booking.status = 'Cancelled'
+
+    trek.available_slots += 1
+
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"msg": "Database error occured during cancellation."}), 500
+
+    return jsonify({
+        "msg": f"Successfully cancelled your booking for '{trek.name}'.",
+        "trek_id": trek.id,
+        "new_available_slots": trek.available_slots,
+        "booking_status": booking.status
+    }), 200
+
 # ==========================================
 # STAFF ROUTES (Phase 6)
 # ==========================================
+
+@app.route('/staff/profile', methods=['PUT'])
+@role_required(['staff'])
+def update_staff_profile():
+    user_id = int(get_jwt_identity())
+
+    profile = StaffProfile.query.filter_by(user_id=user_id).first()
+
+    if not profile:
+        return jsonify({"msg": "Profile not found"}), 404
+
+    data = request.get_json()
+
+    if 'name' in data:
+        profile.name = data['name']
+    if 'contact_details' in data:
+        profile.contact_details = data['contact_details']
+
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"msg": "Database error occured while updating profile."}), 500
+
+    return jsonify({
+        "msg": "Profile updated successfully!",
+        "name": profile.name,
+        "contact_details": profile.contact_details
+    }), 200
+
 @app.route('/staff/my-treks', methods=['GET'])
 @role_required(['staff'])
 def get_my_assigned_trek():
@@ -951,6 +1021,39 @@ def update_trek_status(trek_id):
         "msg": f"Successfully updated trek status to {new_status}",
         "trek_id": trek.id,
         "new_status": trek.status
+    }), 200
+
+@app.route('/staff/trek/<int:trek_id>/slots', methods=['PUT'])
+@role_required(['staff'])
+def update_trek_slot(trek_id):
+    data = request.get_json()
+    new_slots = data.get('available_slots')
+
+    if new_slots is None or not isinstance(new_slots, int) or new_slots < 0:
+        return jsonify({"msg": "Please provide a valid 'available_slots' integer (0 or greater)."}), 400
+
+    staff_id = int(get_jwt_identity())
+
+    trek = Trek.query.get(trek_id)
+
+    if not trek:
+        return jsonify({"msg": "Trek not found."}), 404
+
+    if trek.assigned_staff_id != staff_id:
+        return jsonify({"msg": "Unauthorized: You dont have the permission to modify this trek's inventory."}), 403
+
+    trek.available_slots = new_slots
+
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"msg": "Database error occured."}), 500
+
+    return jsonify({
+        "msg": f"Successfully updated inventory. {new_slots} slots are now available.",
+        "trek_id": trek.id,
+        "new_available_slots": trek.available_slots
     }), 200
 
 @app.route('/staff/trek/<int:trek_id>/participants', methods=['GET'])
