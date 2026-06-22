@@ -918,6 +918,24 @@ def cancel_booking(booking_id):
         "booking_status": booking.status
     }), 200
 
+@app.route('/trekker/export-history', methods=['POST'])
+@role_required(['trekker'])
+def trigger_csv_export():
+    user_id = int(get_jwt_identity())
+
+    # 2. Import the task INSIDE the route 
+    # (Doing this at the top of the file would cause a circular import error!)
+    from tasks import export_booking_history_csv
+
+    # Pin the ticket to the board! 
+    # The .delay() command is what sends this to Redis instead of running it here .
+    export_booking_history_csv.delay(user_id)
+
+    # Immediately return to the user without waiting for the file to generate
+    return jsonify({
+        "msg": "Your CSV export has started in the background! We will notify you when it is ready.",
+        "status": "processing"
+    }), 202
 # ==========================================
 # STAFF ROUTES (Phase 6)
 # ==========================================
