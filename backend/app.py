@@ -5,6 +5,7 @@ from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, 
     get_jwt, current_user, verify_jwt_in_request, get_jwt_identity
 )
+from flask_sse import sse
 
 from functools import wraps
 from datetime import datetime, timedelta
@@ -17,6 +18,10 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'super_secret_key_for_viva' # We will need this later for login tokens
 app.config['JWT_SECRET_KEY'] = 'tma_production_jwt_secret_9988_extra_secure' # Mandatory for token signing
 
+# ==========================================
+#  SSE REDIS CONFIG (Phase 8 - Radio Tower)
+# ==========================================
+app.config['REDIS_URL'] = 'redis://localhost:6379/2'
 
 db.init_app(app)
 jwt = JWTManager(app)
@@ -436,6 +441,14 @@ def emergency_cancel_trek(trek_id):
 
     db.session.commit()
 
+    sse.publish(
+        {
+            "message": f"🚨 EMERGENCY: The '{trek.name}' trek has been officially CANCELLED by administration.",
+            "trek_id": trek.id
+        },
+        type="emergency_alert"
+    )
+
     return jsonify({
         "msg": f"EMERGENCY OVERRIDE: Trek '{trek.name}' has been officially cancelled.",
         "freed_staff_id": freed_staff,
@@ -842,6 +855,30 @@ def book_trek():
     
     try:
         db.session.commit()
+
+        # ---SSE BROADCAST FOR ADMIN---
+        sse.publish(
+            {
+                "message": f"New booking recieved for {target_trek.name}!",
+                "trek_id": target_trek.id,
+                "booking_id": new_booking.id,
+                "new_available_slots": target_trek.available_slots
+            },
+            type="admin_dashboard_update"
+        )
+        # ------------------------------------
+
+        # ---- Filterd SSE BROADCAST FOR STAFF---
+        if target_trek.assigned_staff_id:
+            sse.publish(
+                {
+                    "message": f"A new participant booked your trek: {target_trek.name}!",
+                    "trek_id": target_trek.id,
+                    "new_available_slots": target_trek.available_slots
+                },
+                type=f"staff_alert_{target_trek.assigned_staff_id}"
+            )
+
     except Exception as e:
         db.session.rollback()
         return jsonify({"msg": "A database error occurred during booking."}), 500
@@ -1109,6 +1146,10 @@ def get_trek_participants(trek_id):
         "participants": participants
     }), 200
 
+# ==========================================
+#  SSE BLUEPRINT (Phase 8 - Radio Tower)
+# ==========================================
+app.register_blueprint(sse, url_prefix='/stream')
 
 # Start the local development server
 if __name__ == '__main__':

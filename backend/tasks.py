@@ -6,6 +6,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from celery_worker import celery_app
 from models import db, User, Booking, Trek
+from flask_sse import sse
 
 # The @celery_app.task decorator is the magic wand that turns this normal 
 # Python function into a "Background Task" that Redis can queue.
@@ -50,9 +51,21 @@ def export_booking_history_csv(user_id):
                 trek.start_date.strftime('%Y-%m-%d'),
                 trek.end_date.strftime('%Y-%m-%d')
             ])
-    print(f"Chef finished! File saved as {filename}")
-    return f"/static/exports/{filename}"
+    filepath_url = f"/static/export/{filename}"
 
+    sse.publish(
+        {
+            "message": "Your CSV export is ready!",
+            "link": filepath_url
+        },
+        type=f"csv_ready_{user_id}"  # <-- THIS IS THE MAGIC SHIELD
+        #By adding that type argument, the backend isn't just screaming into the void.
+        # It is putting a strict label on the message
+        # If Piyush (User ID: 2) asks for a CSV, 
+        # the message goes out labeled specifically as csv_ready_2
+    )
+    print(f"Chef finished! File saved as {filename}. Live notification broadcasted!")
+    return filepath_url
 
 # ==========================================
 #  CORE EMAIL FUNCTION
