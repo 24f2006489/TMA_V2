@@ -6,6 +6,7 @@ from flask_jwt_extended import (
     get_jwt, current_user, verify_jwt_in_request, get_jwt_identity
 )
 from flask_sse import sse
+from flask_caching import Cache
 
 from functools import wraps
 from datetime import datetime, timedelta
@@ -19,12 +20,22 @@ app.config['SECRET_KEY'] = 'super_secret_key_for_viva' # We will need this later
 app.config['JWT_SECRET_KEY'] = 'tma_production_jwt_secret_9988_extra_secure' # Mandatory for token signing
 
 # ==========================================
-#  SSE REDIS CONFIG (Phase 8 - Radio Tower)
+#  SSE REDIS CONFIG 
 # ==========================================
 app.config['REDIS_URL'] = 'redis://localhost:6379/2'
 
+# ==========================================
+#  CACHING CONFIG 
+# ==========================================
+app.config.from_mapping({
+    "CACHE_TYPE": 'RedisCache',
+    "CACHE_REDIS_URL" : 'redis://localhost:6379/3',
+    "CACHE_DEFAULT_TIMEOUT" : 300
+})
+
 db.init_app(app)
 jwt = JWTManager(app)
+cache = Cache(app)
 
 # ======================================
 #    @ JWT LOADER (The Token Bridge)
@@ -49,15 +60,20 @@ def role_required(allowed_roles):
         def decorator(*args, **kwargs):
             verify_jwt_in_request()
             claims = get_jwt()
+            user_id = get_jwt_identity()
 
+            # 1. Check if the role is permitted
             if claims.get("role") not in allowed_roles:
                 return jsonify({"msg": f"Access denied. Required clearance: {allowed_roles}"}), 403
 
+            # 2. EMERGENCY SHIELD: Verify the user isn't blacklisted mid-session!
+            user = db.session.get(User, int(user_id))
+            if not user or not user.is_active:
+                return jsonify({"msg": "Account deactivated. Access revoked."}), 403
             
             return fn(*args, **kwargs)
         return decorator
     return wrapper
-
 
 # ==========================================
 #  CORE ROUTES
@@ -134,6 +150,7 @@ def test_admin_dashboard():
 
 @app.route('/admin/dashboard/stats', methods=['GET'])
 @role_required(['admin'])
+@cache.cached(timeout=120, key_prefix='admin_dashboard_stats')
 def get_admin_stats():
     total_trekkers = User.query.filter_by(role='trekker').count()
     total_staff = User.query.filter_by(role='staff').count()
@@ -343,6 +360,7 @@ def create_trek():
 
     try:
         db.session.commit()
+        cache.clear()
     except Exception as e:
         db.session.rollback() # If the name isn't unique, safely cancel the save
         return jsonify({"msg": "Error: Trek name might already exist."}), 409
@@ -368,6 +386,7 @@ def delete_trek(trek_id):
 
     db.session.delete(trek)
     db.session.commit()
+    cache.clear()
 
     return jsonify({"msg": f"Trek '{trek.name}' has been successfully deleted."}), 200
 
@@ -413,7 +432,10 @@ def update_trek(trek_id):
                 trek.end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
         except ValueError:
             return jsonify({"msg": "Invalid date format. Please use YYYY-MM-DD"}), 400
+
+        
         db.session.commit()
+        cache.clear()
     
     return jsonify({
         "msg": f"Trek '{trek.name}' updated successfully.",
@@ -440,6 +462,7 @@ def emergency_cancel_trek(trek_id):
     trek.assigned_staff_id = None
 
     db.session.commit()
+    cache.clear()
 
     sse.publish(
         {
@@ -551,6 +574,7 @@ def assign_staff_to_trek(trek_id):
         trek.status = 'Approved'
 
     db.session.commit()
+    cache.clear()
 
     return jsonify({
         "msg": f"Staff member successfully assigned to '{trek.name}'.",
@@ -755,6 +779,10 @@ def update_trekker_profile():
     }), 200
 
 @app.route('/treks/available', methods=['GET'])
+@cache.cached(timeout=60, query_string=True)
+            # <-- Caches the specific search for 60 seconds
+            # By setting query_string=True, 
+            # Redis is smart enough to save a different copy for every unique search filter!
 def view_open_treks():
     search_location = request.args.get('location')
     search_difficulty = request.args.get('difficulty')
@@ -856,6 +884,10 @@ def book_trek():
     try:
         db.session.commit()
 
+        # --- CACHE INVALIDATION ---
+        cache.clear()
+        cache.delete_memoized('get_trek_participants', target_trek.id) # Surgically deletes ONLY this trek's staff roster cache!
+
         # ---SSE BROADCAST FOR ADMIN---
         sse.publish(
             {
@@ -944,6 +976,11 @@ def cancel_booking(booking_id):
 
     try:
         db.session.commit()
+
+        # --- CACHE INVALIDATION ---
+        cache.clear()
+        cache.delete_memoized('get_trek_participants', trek.id) # <-- NEW: Keep staff rosters accurate!
+
     except Exception as e:
         db.session.rollback()
         return jsonify({"msg": "Database error occured during cancellation."}), 500
@@ -1068,6 +1105,7 @@ def update_trek_status(trek_id):
     
     try:
         db.session.commit()
+        cache.clear()
     except Exception as e:
         db.session.rollback()
         return jsonify({"msg": "Database error occurred."}), 500
@@ -1101,6 +1139,7 @@ def update_trek_slot(trek_id):
 
     try:
         db.session.commit()
+        cache.clear()
     except Exception as e:
         db.session.rollback()
         return jsonify({"msg": "Database error occured."}), 500
@@ -1113,6 +1152,7 @@ def update_trek_slot(trek_id):
 
 @app.route('/staff/trek/<int:trek_id>/participants', methods=['GET'])
 @role_required(['staff'])
+@cache.memoize(timeout=300) # <-- Caches this specific trek's roster for 5 minutes
 def get_trek_participants(trek_id):
     staff_id = int(get_jwt_identity())
 
