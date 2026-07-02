@@ -8,6 +8,8 @@ from flask_jwt_extended import (
 from flask_sse import sse
 from flask_caching import Cache
 
+from flask_cors import CORS
+
 from functools import wraps
 from datetime import datetime, timedelta
 
@@ -36,6 +38,7 @@ app.config.from_mapping({
 db.init_app(app)
 jwt = JWTManager(app)
 cache = Cache(app)
+CORS(app)
 
 # ======================================
 #    @ JWT LOADER (The Token Bridge)
