@@ -156,13 +156,13 @@ def test_admin_dashboard():
 @cache.cached(timeout=120, key_prefix='admin_dashboard_stats')
 def get_admin_stats():
     total_trekkers = User.query.filter_by(role='trekker').count()
-    total_staff = User.query.filter_by(role='staff').count()
+    total_staffs = User.query.filter_by(role='staff').count()
     total_treks = Trek.query.count()
     total_bookings = Booking.query.count()
     
     return jsonify({
         "total_trekkers": total_trekkers,
-        "total_staff": total_staff,
+        "total_staffs": total_staffs,
         "total_treks": total_treks,
         "total_bookings": total_bookings
     }), 200
@@ -608,7 +608,7 @@ def get_all_staff():
             "user_id": staff.user_id,
             "name": staff.name,
             "contact_details": staff.contact_details,
-            "status": staff.status
+            "status": "Active" if staff.user.is_active else "Blacklisted"
         } for staff in staff_list
     ]
 
