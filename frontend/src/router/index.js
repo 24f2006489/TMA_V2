@@ -20,7 +20,12 @@ const router = createRouter({
       name: 'admin-dashboard',
       component: AdminDashboardView,
       meta: { requiresAuth: true, requiredRole: 'admin' }
-    }
+    },
+    {
+      path: '/admin/staff/:id', // The :id makes this dynamic!
+      name: 'staff-details',
+      component: () => import('../views/StaffDetailView.vue')
+    },
   ]
 })
 

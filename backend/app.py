@@ -151,6 +151,41 @@ def test_admin_dashboard():
         "msg": f"Welcome to the highly secure Admin Dashboard, {current_user.email}!"
     }), 200
 
+@app.route('/admin/reports', methods=['GET'])  
+## This route will scans the static/reports folder 
+# and sends a list of available files(monthy reports for admin) to the Vue frontend.
+@role_required(['admin'])
+def get_monthly_reports():
+    import os
+    
+    report_dir = os.path.join('static', 'reports')
+    
+    # If the folder doesn't exist yet, return an empty list safely
+    if not os.path.exists(report_dir):
+        return jsonify({"reports": []}), 200
+        
+    reports = []
+    
+    # Scan the directory for files
+    for filename in os.listdir(report_dir):
+        if filename.startswith('monthly_report_') and filename.endswith('.html'):
+            filepath = os.path.join(report_dir, filename)
+            
+            # Extract the creation time from the file metadata
+            timestamp = os.path.getmtime(filepath)
+            date_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            
+            reports.append({
+                "filename": filename,
+                "date_created": date_str,
+                "url": f"/static/reports/{filename}"
+            })
+            
+    # Sort the reports so the newest ones are at the top!
+    reports.sort(key=lambda x: x['date_created'], reverse=True)
+    
+    return jsonify({"reports": reports}), 200
+
 @app.route('/admin/dashboard/stats', methods=['GET'])
 @role_required(['admin'])
 @cache.cached(timeout=120, key_prefix='admin_dashboard_stats')
@@ -591,28 +626,125 @@ def assign_staff_to_trek(trek_id):
 @role_required(['admin'])
 def get_all_staff():
     search_query = request.args.get('search')
-
     query = StaffProfile.query
 
     if search_query:
-        if search_query.isdigit(): # if you type a number, then search by ID
+        if search_query.isdigit(): 
             query = query.filter(StaffProfile.user_id == int(search_query))
-        else: # if you type a word, then search by name
+        else: 
             query = query.filter(StaffProfile.name.ilike(f"%{search_query}%"))
 
     staff_list = query.all()
+    
+    # Get today's exact date for our comparisons
+    today = datetime.now().date()
+    
+    results = []
 
-    results = [
-        {
+    for staff in staff_list:
+        # Fetch all treks assigned to this specific staff member
+        assigned_treks = Trek.query.filter_by(assigned_staff_id=staff.user_id).all()
+        
+        # Initialize default values
+        prev_trek_name = "None"
+        curr_trek_name = "None"
+        up_trek_name = "None"
+        
+        # 1. PREVIOUS TREKS (Ended before today)
+        # Sort descending so the MOST RECENT previous trek is at index 0
+        past_treks = sorted([t for t in assigned_treks if t.end_date < today], key=lambda x: x.end_date, reverse=True)
+        if past_treks:
+            prev_trek_name = past_treks[0].name
+            
+        # 2. CURRENT TREKS (Today falls between start and end date)
+        current_treks = [t for t in assigned_treks if t.start_date <= today <= t.end_date]
+        if current_treks:
+            curr_trek_name = current_treks[0].name
+            
+        # 3. UPCOMING TREKS (Starts after today)
+        # Sort ascending so the SOONEST upcoming trek is at index 0
+        future_treks = sorted([t for t in assigned_treks if t.start_date > today], key=lambda x: x.start_date)
+        if future_treks:
+            up_trek_name = future_treks[0].name
+
+        results.append({
             "id": staff.id,
             "user_id": staff.user_id,
             "name": staff.name,
             "contact_details": staff.contact_details,
-            "status": "Active" if staff.user.is_active else "Blacklisted"
-        } for staff in staff_list
-    ]
+            "status": "Active" if staff.user.is_active else "Blacklisted",
+            
+            # Append our new smart fields to the JSON payload!
+            "previous_trek": prev_trek_name,
+            "current_trek": curr_trek_name,
+            "upcoming_trek": up_trek_name
+        })
 
     return jsonify({"count": len(results), "staff": results}), 200
+
+@app.route('/admin/staff/<int:staff_id>/details', methods=['GET'])
+@role_required(['admin'])
+def get_staff_full_details(staff_id):
+    target_staff = User.query.get(staff_id)
+    if not target_staff or target_staff.role != 'staff':
+        return jsonify({"msg": "Staff not found"}), 404
+
+    profile = target_staff.staff_profile
+    assigned_treks = Trek.query.filter_by(assigned_staff_id=staff_id).all()
+    
+    today = datetime.now().date()
+    
+    past_treks = []
+    current_treks = []
+    upcoming_treks = []
+    
+    for trek in assigned_treks:
+        # Calculate exactly how many people have booked this specific trek
+        booked_count = len(trek.bookings)
+        
+        trek_data = {
+            "trek_id": trek.id,
+            "name": trek.name,
+            "location": trek.location,
+            "start_date": trek.start_date.strftime('%Y-%m-%d'),
+            "end_date": trek.end_date.strftime('%Y-%m-%d'),
+            "duration": trek.duration,
+            "difficulty": trek.difficulty,
+            "status": trek.status,
+            "total_capacity": trek.available_slots + booked_count,
+            "slots_remaining": trek.available_slots,
+            "currently_booked": booked_count
+        }
+        
+        # Categorize based on today's date
+        if trek.end_date < today:
+            past_treks.append(trek_data)
+        elif trek.start_date <= today <= trek.end_date:
+            current_treks.append(trek_data)
+        else:
+            upcoming_treks.append(trek_data)
+            
+    # Sort them logically for the UI
+    past_treks.sort(key=lambda x: x['end_date'], reverse=True) # Most recent past trek first
+    upcoming_treks.sort(key=lambda x: x['start_date'])         # Soonest upcoming trek first
+    
+    return jsonify({
+        "staff_info": {
+            "user_id": target_staff.id,
+            "name": profile.name if profile else "Unknown",
+            "email": target_staff.email,
+            "contact_details": profile.contact_details if profile else "N/A",
+            "status": "Active" if target_staff.is_active else "Blacklisted"
+        },
+        "stats": {
+            "total_completed": len(past_treks),
+            "total_upcoming": len(upcoming_treks),
+            "currently_active": len(current_treks)
+        },
+        "past_treks": past_treks,
+        "current_treks": current_treks,
+        "upcoming_treks": upcoming_treks
+    }), 200
 
 @app.route('/admin/treks', methods=['GET'])
 @role_required(['admin'])
@@ -666,19 +798,31 @@ def get_all_trekkers():
             query = query.filter(TrekkerProfile.name.ilike(f"%{search_query}%"))
 
     trekkers = query.all()
-
+    
+    today = datetime.now().date()
     results = []
+    
     for user in trekkers:
         profile = user.trekker_profile
-
-        booking_history = []
-        for booking in user.bookings:
-            booking_history.append({
-                "booking_id": booking.id,
-                "trek_name": booking.trek.name,
-                "start_date": booking.trek.start_date.strftime('%Y-%m-%d'),
-                "status": booking.trek.status
-            })
+        
+        # Grab all the treks this user has booked
+        booked_treks = [booking.trek for booking in user.bookings]
+        
+        prev_trek_name = "None"
+        curr_trek_name = "None"
+        up_trek_name = "None"
+        
+        # 1. PREVIOUS TREKS
+        past_treks = sorted([t for t in booked_treks if t.end_date < today], key=lambda x: x.end_date, reverse=True)
+        if past_treks: prev_trek_name = past_treks[0].name
+            
+        # 2. CURRENT TREKS
+        current_treks = [t for t in booked_treks if t.start_date <= today <= t.end_date]
+        if current_treks: curr_trek_name = current_treks[0].name
+            
+        # 3. UPCOMING TREKS
+        future_treks = sorted([t for t in booked_treks if t.start_date > today], key=lambda x: x.start_date)
+        if future_treks: up_trek_name = future_treks[0].name
 
         results.append({
             "user_id": user.id,
@@ -686,14 +830,36 @@ def get_all_trekkers():
             "name": profile.name if profile else "N/A",
             "contact_details": profile.contact_details if profile else "N/A",
             "emergency_contact": profile.emergency_contact if profile else "N/A",
-            "is_active": user.is_active,
-            "total_bookings": len(booking_history),
-            "bookings": booking_history
+            "status": "Active" if user.is_active else "Blacklisted",
+            "previous_trek": prev_trek_name,
+            "current_trek": curr_trek_name,
+            "upcoming_trek": up_trek_name
         })
+        
     return jsonify({
         "total_trekkers": len(results),
         "trekkers": results
     }), 200
+
+@app.route('/admin/trekker/<int:user_id>/export', methods=['POST'])
+@role_required(['admin'])
+def admin_trigger_csv_export(user_id):
+    # 1. Verify the target is actually a trekker
+    target_user = User.query.get(user_id)
+    if not target_user or target_user.role != 'trekker':
+        return jsonify({"msg": "Trekker not found."}), 404
+
+    # 2. Import the task INSIDE the route to avoid circular imports
+    from tasks import export_booking_history_csv
+
+    # 3. Pin the ticket to the Celery board!
+    export_booking_history_csv.delay(user_id)
+
+    # 4. Immediately return to the Admin without freezing the dashboard
+    return jsonify({
+        "msg": f"CSV export for Trekker #{user_id} has started in the background! The report will be emailed shortly.",
+        "status": "processing"
+    }), 202
 
 @app.route('/admin/bookings', methods=['GET'])
 @role_required(['admin'])

@@ -4,6 +4,13 @@ import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useRouter } from 'vue-router'
 
+// --- CHART.JS IMPORTS ---
+import { Bar, Doughnut } from 'vue-chartjs'
+import { Chart as ChartJS, Title, Tooltip, Legend, BarElement, CategoryScale, LinearScale, ArcElement } from 'chart.js'
+
+// Register the chart components
+ChartJS.register(Title, Tooltip, Legend, BarElement, CategoryScale, LinearScale, ArcElement)
+
 const authStore = useAuthStore()
 const router = useRouter()
 
@@ -14,6 +21,44 @@ const currentTab = ref('stats')
 // Stats STATE
 const stats = ref(null)         // Holds the data from Flask
 const errorMessage = ref('')   // Holds any error message
+
+// --- CHART DATA GENERATORS ---
+// 1. Doughnut Chart: Compares the types of users on the platform
+const userDemographicsData = computed(() => {
+    if (!stats.value) return null;
+    return {
+        labels: ['Trekkers', 'Staff Members'],
+        datasets: [{
+            data: [stats.value.total_trekkers, stats.value.total_staffs],
+            backgroundColor: ['rgba(54, 162, 235, 0.7)', 'rgba(255, 206, 86, 0.7)'],
+            borderColor: ['#fff', '#fff'],
+            borderWidth: 2
+        }]
+    }
+})
+
+// 2. Bar Chart: Platform Activity
+const platformActivityData = computed(() => {
+    if (!stats.value) return null;
+    return {
+        labels: ['Active Treks', 'Total Bookings'],
+        datasets: [{
+            label: 'Platform Metrics',
+            data: [stats.value.total_treks, stats.value.total_bookings],
+            backgroundColor: ['rgba(75, 192, 192, 0.7)', 'rgba(153, 102, 255, 0.7)'],
+            borderRadius: 5 // Gives the bars rounded, modern edges
+        }]
+    }
+})
+
+// General options to make the charts responsive and pretty
+const chartOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+        legend: { position: 'bottom' }
+    }
+}
 
 // Staff STATE
 const staffList = ref([])
@@ -59,8 +104,21 @@ const newTrek = ref({
 // Booking STATE
 const bookingList = ref([])
 
+// Trekkers STATE
+const trekkerList = ref([])
+const searchTrekkerQuery = ref('')
+
+
+
+// Monthly Report STATE
+const reportList = ref([])
+
+
+
 
 // 2. ACTIONS
+
+// Stats Action
 const fetchStats = async () => {
     try{
         const response = await axios.get('http://127.0.0.1:5000/admin/dashboard/stats', {
@@ -75,6 +133,7 @@ const fetchStats = async () => {
     }
 }
 
+// Staff Action
 const fetchStaff = async () => {
     try {
         const response = await axios.get('http://127.0.0.1:5000/admin/staffs', {
@@ -112,7 +171,6 @@ const handleCreateStaff = async () => {
     }
 }
 
-// --- NEW STAFF ACTIONS ---
 
 const handleBlacklistStaff = async (userId) => {
     try {
@@ -166,7 +224,7 @@ const handleUpdateStaff = async (userId, currentName, currentContact) => {
     }
 }
 
-
+// Trek Action
 const fetchTreks = async () => {
     try {
         const response = await axios.get('http://127.0.0.1:5000/admin/treks', {
@@ -252,7 +310,7 @@ const handleEmergencyCancel = async (trekId) => {
 }
 
 // ==========================================
-//  SMART STAFF ASSIGNMENT LOGIC
+// STAFF ASSIGNMENT LOGIC
 // ==========================================
 const activeAssignmentTrek = ref(null)  // Holds the trek we are currently assigning
 const availableStaffList = ref([])      // Holds the filtered list from Flask
@@ -315,12 +373,67 @@ const fetchBookings = async () => {
     }
 }
 
+
+// Trekkers Action
+
+const fetchTrekkers = async () => {
+    try {
+        const response = await axios.get('http://127.0.0.1:5000/admin/trekkers', {
+            params: { search: searchTrekkerQuery.value },
+            headers: { Authorization: `Bearer ${authStore.token}` }
+        })
+        trekkerList.value = response.data.trekkers
+    } catch (error) {
+        console.error("Failed to fetch trekkers:", error)
+    }
+}
+
+const handleExportTrekkerHistory = async (userId) => {
+    try {
+        const response = await axios.post(`http://127.0.0.1:5000/admin/trekker/${userId}/export`, {}, {
+            headers: { Authorization: `Bearer ${authStore.token}` }
+        })
+        // Show the success message (e.g., "CSV export has started...")
+        alert(response.data.msg)
+    } catch (error) {
+        alert(error.response?.data?.msg || "Failed to trigger CSV export.")
+    }
+}
+
+
+const handleToggleTrekkerStatus = async (userId) => {
+    try {
+        const response = await axios.put(`http://127.0.0.1:5000/admin/user/${userId}/blacklist`, {}, {
+            headers: { Authorization: `Bearer ${authStore.token}` }
+        })
+        alert(response.data.msg)
+        fetchTrekkers() // Refresh the table instantly
+    } catch (error) {
+        alert(error.response?.data?.msg || "Error updating status")
+    }
+}
+
+
+// Monthly Report Action
+const fetchReports = async () => {
+    try {
+        const response = await axios.get('http://127.0.0.1:5000/admin/reports', {
+            headers: { Authorization: `Bearer ${authStore.token}` }
+        })
+        reportList.value = response.data.reports
+    } catch (error) {
+        console.error("Failed to fetch reports:", error)
+    }
+}
+
 // Automatically fetch the stats the moment this page is opened
 onMounted(() => {
     fetchStats()
     fetchStaff()
     fetchTreks()
     fetchBookings()
+    fetchTrekkers()
+    fetchReports()
 })
 
 const handleLogout = () => {
@@ -330,266 +443,621 @@ const handleLogout = () => {
 </script>
 
 <template>
-    <main>
-        <h1>Admin Dashboard</h1>
-        <p>Welcome! Your role is: {{ authStore.role }}</p>
-        <button @click="handleLogout">Logout</button>
-
-        <hr>
-
-        <!-- THE NAVIGATION MENU -->
-        <nav>
-            <!-- Clicking these buttons simply changes the 'currentTab' variable -->
-            <button @click="currentTab = 'stats'">Overview Stats</button>
-            <button @click="currentTab = 'treks'">Manage Treks</button>
-            <button @click="currentTab = 'staff'">Manage Staff</button>
-            <button @click="currentTab = 'bookings'">View Bookings</button>
-        </nav>
-
-        <hr>
-
-        <!-- THE DYNAMIC CONTENT AREAS -->
-        
-        <!-- Only shows up if currentTab is 'stats' -->
-        <section v-if="currentTab === 'stats'">
-            <h2>Statistics Overview</h2>
-            <p v-if="errorMessage" style="color: red;">{{ errorMessage }}</p>
-
-            <div v-if="stats">
-                <ul>
-                    <li>Total Treks: {{ stats.total_treks }}</li>
-                    <li>Total Trekkers: {{ stats.total_trekkers }}</li>
-                    <li>Total Staff: {{ stats.total_staffs }}</li>
-                    <li>Total Bookings: {{ stats.total_bookings }}</li>
-                </ul>
-            </div>
-            <div v-else>
-                <p>Loading statistics...</p>
-            </div>
-        </section>
-
-        <!-- Only shows up if currentTab is 'treks' -->
-        <section v-if="currentTab === 'treks'">
-            <h2>Trek Management</h2>
-            
-            <div style="border: 1px solid black; padding: 15px; margin-bottom: 20px;">
-                <h3>Create New Trek Route</h3>
-                <form @submit.prevent="handleCreateTrek">
-                    <div>
-                        <label>Name</label>
-                        <input type="text" v-model="newTrek.name" placeholder="e.g. Everest Base Camp" required />
-                    </div><br>
-                    <div>
-                        <label>Location</label>
-                        <input type="text" v-model="newTrek.location" required />
-                    </div><br>
-                    <div>
-                        <label>Difficulty: </label>
-                        <select v-model="newTrek.difficulty">
-                            <option value="Easy">Easy</option>
-                            <option value="Moderate">Moderate</option>
-                            <option value="Hard">Hard</option>
-                        </select>
-                    </div><br>
-                    <div>
-                        <label>Duration (Days): </label>
-                        <input type="number" min="1" v-model="newTrek.duration" required />
-                    </div><br>
-                    <div>
-                        <label>Available Slots: </label>
-                        <input type="number" min="1" v-model="newTrek.available_slots" required />
-                    </div><br>
-                    <div>
-                        <label>Start Date: </label>
-                        <input type="date" v-model="newTrek.start_date" required />
-                    </div><br>
-                    <div>
-                        <label>End Date: </label>
-                        <input type="date" v-model="newTrek.end_date" required />
-                    </div><br>
-
-                    <button type="submit">Create Trek Route</button>
-                </form>
+    <main class="dashboard-bg p-4">
+        <div class="container-fluid">
+            <div class="d-flex justify-content-between align-items-center mb-4 p-3 neo-panel">
+                <h2 class="mb-0 text-dark">Admin Workspace</h2>
+                <div class="d-flex align-items-center gap-3">
+                    <span class="badge bg-primary fs-6">Role: {{ authStore.role }}</span>
+                    <button class="btn btn-outline-danger" @click="handleLogout">Logout</button>
+                </div>
             </div>
 
-            <h3>Existing Treks</h3>
-            <div style="margin-bottom: 10px;">
-                <strong>Instant Filter: </strong>
-                <input 
-                    type="text" 
-                    v-model="searchTrekQuery" 
-                    placeholder="Search by Name, Staff, or Difficulty..." 
-                    style="width: 300px;"
-                />
-                <button @click="searchTrekQuery = ''">Clear</button>
-            </div>
-
-            <table border="1" cellpadding="5">
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>Name</th>
-                        <th>Dates</th>
-                        <th>Difficulty</th>
-                        <th>Slots</th>
-                        <th>Status</th>
-                        <th>Assigned Staff</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr v-for="trek in filteredTreks" :key="trek.id">
-                        <td>{{ trek.id }}</td>
-                        <td>{{ trek.name }}<br><small>{{ trek.location }}</small></td>
-                        <td>{{ trek.start_date }} to {{ trek.end_date }}<br><small>({{ trek.duration }} days)</small></td>
-                        <td>{{ trek.difficulty }}</td>
-                        <td>{{ trek.available_slots }}</td>
-                        
-                        <td :style="trek.status === 'Canceled' ? 'color: red; font-weight: bold;' : ''">
-                            {{ trek.status }}
-                        </td>
-                        
-                        <td :style="trek.assigned_staff === 'Unassigned' ? 'color: red; font-weight: bold;' : ''">
-                            {{ trek.assigned_staff }}
-                        </td>
-
-                        <td>
-                            <button @click="handleUpdateTrek(trek)">Update</button>
-                            <button @click="openAssignmentTool(trek)">Assign Staff</button>
-                            <button @click="handleEmergencyCancel(trek.id)">Cancel Trek</button>
-                            <button @click="handleDeleteTrek(trek.id)">Delete</button>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-
-            <div v-if="activeAssignmentTrek" style="border: 2px dashed #3498db; padding: 20px; margin-top: 20px; background-color: #f8f9fa;">
-                <h3>Assigning Staff to: {{ activeAssignmentTrek.name }}</h3>
-                <p><strong>Trek Dates:</strong> {{ activeAssignmentTrek.start_date }} to {{ activeAssignmentTrek.end_date }}</p>
-
-                <div v-if="availableStaffList.length === 0">
-                    <p style="color: red; font-weight: bold;">
-                        ⚠️ No staff members are available for these dates due to scheduling conflicts or the 10-day buffer policy.
-                    </p>
+            <div class="row">
+                <div class="col-md-3 mb-4">
+                    <div class="p-3 neo-panel">
+                        <button class="nav-btn" :class="{ 'active': currentTab === 'stats'}" @click="currentTab = 'stats'">Overview Stats</button>
+                        <button class="nav-btn" :class="{ 'active': currentTab === 'treks' }" @click="currentTab = 'treks'">Manage Treks</button>
+                        <button class="nav-btn" :class="{ 'active': currentTab === 'staff' }" @click="currentTab = 'staff'">Manage Staff</button>
+                        <button class="nav-btn" :class="{ 'active': currentTab === 'trekkers' }" @click="currentTab = 'trekkers'">Manage Trekkers</button>
+                        <button class="nav-btn" :class="{ 'active': currentTab === 'bookings' }" @click="currentTab = 'bookings'">View Bookings</button>
+                        <button class="nav-btn" :class="{ 'active': currentTab === 'reports' }" @click="currentTab = 'reports'">System Reports</button>
+                    </div>
                 </div>
 
-                <div v-else>
-                    <label><strong>Select Available Staff: </strong></label>
-                    <select v-model="selectedStaffId" style="padding: 5px; margin-right: 10px;">
-                        <option disabled value="">-- Choose a Staff Member --</option>
+                <div class="col-md-9">
+                    <div class="p-4 neo-panel">
                         
-                        <option v-for="staff in availableStaffList" :key="staff.staff_id" :value="staff.staff_id">
-                            {{ staff.name }} (ID: {{ staff.staff_id }})
-                        </option>
-                    </select>
-                    
-                    <button @click="submitAssignment" style="background-color: #2ecc71; color: white; padding: 5px 10px;">Confirm Assignment</button>
+                        <!-- ================= STATS TAB ================= -->
+                        <section v-if="currentTab === 'stats'">
+                            <h3 class="border-bottom pb-2 mb-4 text-dark">Statistics Overview</h3>
+                            <p v-if="errorMessage" class="text-danger">{{ errorMessage }}</p>
+
+                            <div v-if="stats">
+                                <!-- THE SKEUO-GLASS NUMBER CARDS -->
+                                <div class="row g-4 mb-5">
+                                    <div class="col-md-6 col-lg-3">
+                                        <div class="neo-card text-center p-4">
+                                            <h2 class="text-primary display-5 fw-bold">{{ stats.total_treks }}</h2>
+                                            <p class="text-muted fw-bold mb-0">Total Treks</p>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6 col-lg-3">
+                                        <div class="neo-card text-center p-4">
+                                            <h2 class="text-success display-5 fw-bold">{{ stats.total_trekkers }}</h2>
+                                            <p class="text-muted fw-bold mb-0">Trekkers</p>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6 col-lg-3">
+                                        <div class="neo-card text-center p-4">
+                                            <h2 class="text-warning display-5 fw-bold">{{ stats.total_staffs }}</h2>
+                                            <p class="text-muted fw-bold mb-0">Staff Members</p>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6 col-lg-3">
+                                        <div class="neo-card text-center p-4">
+                                            <h2 class="text-info display-5 fw-bold">{{ stats.total_bookings }}</h2>
+                                            <p class="text-muted fw-bold mb-0">Total Bookings</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- THE CHARTS SECTION -->
+                                <h4 class="mb-3 text-secondary">Visual Analytics</h4>
+                                <div class="row g-4">
+                                    <!-- Doughnut Chart -->
+                                    <div class="col-md-6">
+                                        <div class="neo-inset">
+                                            <h6 class="text-center text-muted fw-bold mb-3">User Demographics</h6>
+                                            <div style="height: 250px;">
+                                                <Doughnut v-if="userDemographicsData" :data="userDemographicsData" :options="chartOptions" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- Bar Chart -->
+                                    <div class="col-md-6">
+                                        <div class="neo-inset">
+                                            <h6 class="text-center text-muted fw-bold mb-3">Platform Activity</h6>
+                                            <div style="height: 250px;">
+                                                <Bar v-if="platformActivityData" :data="platformActivityData" :options="chartOptions" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                            </div>
+                            <div v-else class="text-center mt-5">
+                                <p class="text-muted">Loading statistics...</p>
+                            </div>
+                        </section>
+
+                        <section v-if="currentTab === 'treks'">
+                            <h3 class="border-bottom pb-2 mb-4">Trek Management</h3>
+
+                            <div class="card mb-4 shadow-sm border-0 bg-light">
+                                <div class="card-body">
+                                    <h5 class="mb-3">Create New Trek Route</h5>
+                                    <form @submit.prevent="handleCreateTrek" class="row g-3">
+                                        <div class="col-md-4">
+                                            <label class="form-label">Name</label>
+                                            <input type="text" class="form-control" v-model="newTrek.name" required />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label">Location</label>
+                                            <input type="text" class="form-control" v-model="newTrek.location" required />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label">Difficulty</label>
+                                            <select class="form-select" v-model="newTrek.difficulty">
+                                                <option value="Easy">Easy</option>
+                                                <option value="Moderate">Moderate</option>
+                                                <option value="Hard">Hard</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label">Duration (Days)</label>
+                                            <input type="number" min="1" class="form-control" v-model="newTrek.duration" required />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label">Available Slots</label>
+                                            <input type="number" min="1" class="form-control" v-model="newTrek.available_slots" required />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label">Start Date</label>
+                                            <input type="date" class="form-control" v-model="newTrek.start_date" required />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label">End Date</label>
+                                            <input type="date" class="form-control" v-model="newTrek.end_date" required />
+                                        </div>
+                                        <div class="col-12 mt-3">
+                                            <button type="submit" class="btn btn-primary">Create Trek Route</button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <h5 class="mb-0">Existing Treks</h5>
+                                <div class="input-group w-50">
+                                    <input type="text" class="form-control" v-model="searchTrekQuery" placeholder="Filter by Name, Difficulty, Staff..." />
+                                    <button class="btn btn-outline-secondary" @click="searchTrekQuery = ''">Clear</button>
+                                </div>
+                            </div>
+
+                            <div class="table-responsive neo-inset p-3 mb-4">
+                                <table class="table table-borderless table-hover align-middle custom-table mb-0 text-nowrap">
+                                    <thead class="border-bottom border-2">
+                                        <tr>
+                                            <th class="text-center">ID</th>
+                                            <th>Name</th>
+                                            <th>Dates</th>
+                                            <th class="text-center">Difficulty</th>
+                                            <th class="text-center">Slots</th>
+                                            <th class="text-center">Status</th>
+                                            <th class="text-center">Staff</th>
+                                            <th class="text-center">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="trek in filteredTreks" :key="trek.id" class="border-bottom">
+                                            <td class="text-center"><span class="badge bg-secondary rounded-pill px-3">{{ trek.id }}</span></td>
+                                            
+                                            <td><strong>{{ trek.name }}</strong><br><small class="text-muted">{{ trek.location }}</small></td>
+                                            <td>{{ trek.start_date }} to {{ trek.end_date }}<br><small class="text-muted">({{ trek.duration }} days)</small></td>
+                                            
+                                            <td class="text-center"><span class="badge bg-dark rounded-pill">{{ trek.difficulty }}</span></td>
+                                            <td class="text-center"><span class="fw-bold">{{ trek.available_slots }}</span></td>
+                                            
+                                            <td class="text-center">
+                                                <span class="badge rounded-pill px-3"
+                                                      :class="{
+                                                          'bg-success': trek.status === 'Approved',
+                                                          'bg-warning text-dark': trek.status === 'Pending',
+                                                          'bg-danger': trek.status === 'Canceled',
+                                                          'bg-secondary': trek.status === 'Closed' || trek.status === 'Completed'
+                                                      }">
+                                                    {{ trek.status }}
+                                                </span>
+                                            </td>
+                                            
+                                            <td class="text-center" :class="trek.assigned_staff === 'Unassigned' ? 'text-danger fw-bold' : 'text-primary fw-bold'">
+                                                {{ trek.assigned_staff }}
+                                            </td>
+                                            
+                                            <td class="text-center">
+                                                <div class="d-flex flex-nowrap justify-content-center gap-2">
+                                                    <button class="btn btn-sm btn-outline-secondary rounded-pill px-3 fw-bold" @click="handleUpdateTrek(trek)">Edit</button>
+                                                    <button class="btn btn-sm btn-primary rounded-pill px-3 fw-bold" @click="openAssignmentTool(trek)">Assign</button>
+                                                    <button class="btn btn-sm btn-outline-warning rounded-pill px-3 fw-bold" @click="handleEmergencyCancel(trek.id)">Cancel</button>
+                                                    <button class="btn btn-sm btn-outline-danger rounded-pill px-3 fw-bold" @click="handleDeleteTrek(trek.id)">Delete</button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div v-if="activeAssignmentTrek" class="card mt-4 border-primary shadow-sm">
+                                <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                                    <h5 class="mb-0">Assigning Staff to: {{ activeAssignmentTrek.name }}</h5>
+                                    <button class="btn btn-sm btn-light" @click="activeAssignmentTrek = null">Close</button>
+                                </div>
+                                <div class="card-body">
+                                    <p><strong>Trek Dates:</strong> {{ activeAssignmentTrek.start_date }} to {{ activeAssignmentTrek.end_date }}</p>
+                                    <div v-if="availableStaffList.length === 0" class="alert alert-danger">
+                                        ⚠️ No staff members are available for these dates due to scheduling conflicts or the 10-day buffer policy.
+                                    </div>
+
+                                    <div v-else class="d-flex align-items-center gap-3">
+                                        <select class="form-select w-50" v-model="selectedStaffId">
+                                            <option disabled value="">-- Choose a Staff Member --</option>
+                                            <option v-for="staff in availableStaffList" :key="staff.staff_id" :value="staff.staff_id">
+                                                {{ staff.name }} (ID: {{ staff.staff_id }})
+                                            </option>
+                                        </select>
+                                        <button class="btn btn-success" @click="submitAssignment">Confirm Assignment</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section v-if="currentTab === 'staff'">
+                            <h3 class="border-bottom pb-2 mb-4">Staff Management</h3>
+                            <div class="card mb-4 shadow-sm border-0 bg-light">
+                                <div class="card-body">
+                                    <h5 class="mb-3">Create New Staff</h5>
+                                    <form @submit.prevent="handleCreateStaff" class="row g-3">
+                                        <div class="col-md-3">
+                                            <label class="form-label">Name</label>
+                                            <input type="text" class="form-control" v-model="newStaff.name" required />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label">Email</label>
+                                            <input type="email" class="form-control" v-model="newStaff.email" required />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label">Password</label>
+                                            <input type="password" class="form-control" v-model="newStaff.password" required />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label">Contact Details</label>
+                                            <input type="text" class="form-control" v-model="newStaff.contact_details" required />
+                                        </div>
+                                        <div class="col-12 mt-3">
+                                            <button type="submit" class="btn btn-primary">Create Staff Member</button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <h5 class="mb-0">Existing Staff Members</h5>
+                                <div class="input-group w-50">
+                                    <input type="text" class="form-control" v-model="searchStaffQuery" placeholder="Search by ID or Name..." @keyup.enter="fetchStaff" />
+                                    <button class="btn btn-primary" @click="fetchStaff">Search</button>
+                                    <button class="btn btn-outline-secondary" @click="searchStaffQuery = ''; fetchStaff()">Clear</button>
+                                </div>
+                            </div>
+
+                            <!-- Wrapped in neo-inset to match the Treks table -->
+                            <div class="table-responsive neo-inset p-3 mb-4">
+                                <table class="table table-borderless table-hover align-middle custom-table mb-0 text-nowrap">
+                                    <thead class="border-bottom border-2">
+                                        <tr>
+                                            <th class="text-center">User ID</th>
+                                            <th>Name</th>
+                                            <th>Contact</th>
+                                            
+                                            <!-- THE NEW SCHEDULE HEADERS -->
+                                            <th class="text-center">Past Trek</th>
+                                            <th class="text-center">Current Trek</th>
+                                            <th class="text-center">Upcoming Trek</th>
+                                            
+                                            <th class="text-center">Status</th>
+                                            <th class="text-center">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="staff in staffList" :key="staff.id" class="border-bottom">
+                                            <td class="text-center">
+                                                <span class="badge bg-secondary rounded-pill px-3">{{ staff.user_id }}</span>
+                                            </td>
+                                            <td><strong>{{ staff.name }}</strong></td>
+                                            <td>{{ staff.contact_details }}</td>
+                                            
+                                            <!-- THE NEW SCHEDULE DATA CELLS -->
+                                            <td class="text-center">
+                                                <span :class="staff.previous_trek === 'None' ? 'text-muted fst-italic' : 'fw-bold text-secondary'">
+                                                    {{ staff.previous_trek }}
+                                                </span>
+                                            </td>
+                                            <td class="text-center">
+                                                <span :class="staff.current_trek === 'None' ? 'text-muted fst-italic' : 'fw-bold text-success'">
+                                                    {{ staff.current_trek }}
+                                                </span>
+                                            </td>
+                                            <td class="text-center">
+                                                <span :class="staff.upcoming_trek === 'None' ? 'text-muted fst-italic' : 'fw-bold text-primary'">
+                                                    {{ staff.upcoming_trek }}
+                                                </span>
+                                            </td>
+                                            
+                                            <td class="text-center">
+                                                <span class="badge rounded-pill px-3" 
+                                                      :class="staff.status === 'Active' ? 'bg-success' : 'bg-danger'">
+                                                    {{ staff.status }}
+                                                </span>
+                                            </td>
+                                            <td class="text-center">
+                                                <div class="d-flex flex-nowrap justify-content-center gap-2">
+                                                    <button class="btn btn-sm btn-info rounded-pill px-3 fw-bold text-white" @click="router.push('/admin/staff/' + staff.user_id)">View History</button>
+                                                    <button class="btn btn-sm btn-outline-secondary rounded-pill px-3 fw-bold" @click="handleUpdateStaff(staff.user_id, staff.name, staff.contact_details)">Edit</button>
+                                                    <button class="btn btn-sm btn-outline-warning rounded-pill px-3 fw-bold" @click="handleBlacklistStaff(staff.user_id)">Toggle Status</button>
+                                                    <button class="btn btn-sm btn-outline-danger rounded-pill px-3 fw-bold" @click="handleDeleteStaff(staff.user_id)">Delete</button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+
+
+                        <section v-if="currentTab === 'trekkers'">
+                            <h3 class="border-bottom pb-2 mb-4">Trekker Management</h3>
+
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <h5 class="mb-0">Registered Trekkers</h5>
+                                <div class="input-group w-50">
+                                    <input type="text" class="form-control" v-model="searchTrekkerQuery" placeholder="Search by ID or Name..." @keyup.enter="fetchTrekkers" />
+                                    <button class="btn btn-primary" @click="fetchTrekkers">Search</button>
+                                    <button class="btn btn-outline-secondary" @click="searchTrekkerQuery = ''; fetchTrekkers()">Clear</button>
+                                </div>
+                            </div>
+
+                            <div class="table-responsive neo-inset p-3 mb-4">
+                                <table class="table table-borderless table-hover align-middle custom-table mb-0 text-nowrap">
+                                    <thead class="border-bottom border-2">
+                                        <tr>
+                                            <th class="text-center">User ID</th>
+                                            <th>Trekker Info</th>
+                                            <th>Emergency Contact</th>
+                                            <th class="text-center">Past Trek</th>
+                                            <th class="text-center">Current Trek</th>
+                                            <th class="text-center">Upcoming Trek</th>
+                                            <th class="text-center">Status</th>
+                                            <th class="text-center">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="trekker in trekkerList" :key="trekker.user_id" class="border-bottom">
+                                            <td class="text-center">
+                                                <span class="badge bg-secondary rounded-pill px-3">{{ trekker.user_id }}</span>
+                                            </td>
+                                            
+                                            <!-- Standardized Info Column -->
+                                            <td>
+                                                <strong>{{ trekker.name }}</strong><br>
+                                                <small class="text-muted">{{ trekker.email }}</small><br>
+                                                <small class="text-muted">Ph: {{ trekker.contact_details }}</small>
+                                            </td>
+                                            
+                                            <td class="text-danger fw-bold">{{ trekker.emergency_contact }}</td>
+                                            
+                                            <!-- The Categorized Schedule -->
+                                            <td class="text-center">
+                                                <span :class="trekker.previous_trek === 'None' ? 'text-muted fst-italic' : 'fw-bold text-secondary'">
+                                                    {{ trekker.previous_trek }}
+                                                </span>
+                                            </td>
+                                            <td class="text-center">
+                                                <span :class="trekker.current_trek === 'None' ? 'text-muted fst-italic' : 'fw-bold text-success'">
+                                                    {{ trekker.current_trek }}
+                                                </span>
+                                            </td>
+                                            <td class="text-center">
+                                                <span :class="trekker.upcoming_trek === 'None' ? 'text-muted fst-italic' : 'fw-bold text-primary'">
+                                                    {{ trekker.upcoming_trek }}
+                                                </span>
+                                            </td>
+                                            
+                                            <td class="text-center">
+                                                <span class="badge rounded-pill px-3" 
+                                                      :class="trekker.status === 'Active' ? 'bg-success' : 'bg-danger'">
+                                                    {{ trekker.status }}
+                                                </span>
+                                            </td>
+                                            
+                                            <td class="text-center">
+                                                <div class="d-flex flex-nowrap justify-content-center gap-2">
+                                                    <button class="btn btn-sm btn-outline-info rounded-pill px-3 fw-bold" @click="handleExportTrekkerHistory(trekker.user_id)">Export CSV</button>
+                                                    <button class="btn btn-sm btn-outline-warning rounded-pill px-3 fw-bold" @click="handleToggleTrekkerStatus(trekker.user_id)">Toggle Status</button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+
+                        <section v-if="currentTab === 'bookings'">
+                            <div class="d-flex justify-content-between align-items-center mb-4 border-bottom pb-2">
+                                <h3 class="mb-0 text-dark">Global Bookings Ledger</h3>
+                                <button class="btn btn-primary rounded-pill px-4 fw-bold shadow-sm" @click="fetchBookings">Refresh Ledger</button>
+                            </div>
+
+                            <div class="table-responsive neo-inset p-3 mb-4" v-if="bookingList.length > 0">
+                                <table class="table table-borderless table-hover align-middle custom-table mb-0 text-nowrap">
+                                    <thead class="border-bottom border-2">
+                                        <tr>
+                                            <th class="text-center">Receipt ID</th>
+                                            <th>Trek Details</th>
+                                            <th>Start Date</th>
+                                            <th>Trekker Name</th>
+                                            <th>Contact Email</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="booking in bookingList" :key="booking.booking_id" class="border-bottom">
+                                            
+                                            <td class="text-center">
+                                                <span class="badge bg-dark rounded-pill px-3 fs-6">#{{ booking.booking_id }}</span>
+                                            </td>
+                                            
+                                            <td><strong>{{ booking.trek_name }}</strong></td>
+                                            <td><span class="text-secondary fw-bold">{{ booking.trek_start_date }}</span></td>
+                                            <td>{{ booking.trekker_name }}</td>
+                                            
+                                            <td>
+                                                <a :href="'mailto:' + booking.trekker_email" class="text-decoration-none fw-bold">{{ booking.trekker_email }}</a>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            
+                            <div v-else class="neo-inset text-center p-5 mb-4">
+                                <h5 class="text-muted mb-0">No bookings have been made on the platform yet.</h5>
+                            </div>
+                        </section>
+
+
+                        <section v-if="currentTab === 'reports'">
+                            <div class="d-flex justify-content-between align-items-center mb-4 border-bottom pb-2">
+                                <h3 class="mb-0 text-dark">System Report Archive</h3>
+                                <button class="btn btn-primary rounded-pill px-4 fw-bold shadow-sm" @click="fetchReports">Refresh Archive</button>
+                            </div>
+
+                            <div class="table-responsive neo-inset p-3 mb-4" v-if="reportList.length > 0">
+                                <table class="table table-borderless table-hover align-middle custom-table mb-0 text-nowrap">
+                                    <thead class="border-bottom border-2">
+                                        <tr>
+                                            <th>Date Generated</th>
+                                            <th>Report Name</th>
+                                            <th>Type</th>
+                                            <th class="text-center">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="report in reportList" :key="report.filename" class="border-bottom">
+                                            <td><span class="text-secondary fw-bold">{{ report.date_created }}</span></td>
+                                            <td><strong>{{ report.filename }}</strong></td>
+                                            <td><span class="badge bg-dark rounded-pill px-3">Monthly System Report</span></td>
+                                            
+                                            <td class="text-center">
+                                                <a :href="'http://127.0.0.1:5000' + report.url" target="_blank" class="btn btn-sm btn-info text-white rounded-pill px-4 fw-bold">
+                                                    📄 View / Download
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            
+                            <div v-else class="neo-inset text-center p-5 mb-4">
+                                <h5 class="text-muted mb-0">No monthly reports have been generated yet.</h5>
+                                <p class="text-muted small mt-2">Reports are generated automatically by the Celery background worker on the 1st of every month.</p>
+                            </div>
+                        </section>
+                    </div>
                 </div>
-                
-                <br>
-                <button @click="activeAssignmentTrek = null">Cancel / Close Tool</button>
             </div>
-        </section>
-
-        <!-- Only shows up if currentTab is 'staff' -->
-        <section v-if="currentTab === 'staff'">
-            <h2>Staff Management</h2>
-            
-            <div style="border: 1px solid black; padding: 15px; margin-bottom: 20px;">
-                <h3>Create New Staff</h3>
-                <form @submit.prevent="handleCreateStaff">
-                    <div>
-                        <label>Name: </label>
-                        <input type="text" v-model="newStaff.name" required />
-                    </div>
-                    <br>
-                    <div>
-                        <label>Email: </label>
-                        <input type="email" v-model="newStaff.email" required />
-                    </div>
-                    <br>
-                    <div>
-                        <label>Password: </label>
-                        <input type="password" v-model="newStaff.password" required />
-                    </div>
-                    <br>
-                    <div>
-                        <label>Contact Details: </label>
-                        <input type="text" v-model="newStaff.contact_details" required />
-                    </div>
-                    <br>
-                    <button type="submit">Create Staff Member</button>
-                </form>
-            </div>
-
-            <div style="margin-bottom: 20px; padding: 10px; background-color: #eee;">
-                <strong>Search Staff: </strong>
-                <input 
-                    type="text" 
-                    v-model="searchStaffQuery" 
-                    placeholder="Search by Name or User ID..." 
-                    @keyup.enter="fetchStaff"
-                />
-                <button @click="fetchStaff">Search</button>
-                
-                <button @click="searchStaffQuery = ''; fetchStaff()">Clear</button>
-            </div>
-
-            <h3>Existing Staff Members</h3>
-            <table border="1" cellpadding="5">
-                <thead>
-                    <tr>
-                        <th>Profile ID</th>
-                        <th>User ID</th>
-                        <th>Name</th>
-                        <th>Contact</th>
-                        <th>Status</th>
-                        <th>Actions</th> </tr>
-                </thead>
-                <tbody>
-                    <tr v-for="staff in staffList" :key="staff.id">
-                        <td>{{ staff.id }}</td>
-                        <td>{{ staff.user_id }}</td>
-                        <td>{{ staff.name }}</td>
-                        <td>{{ staff.contact_details }}</td> <td>{{ staff.status }}</td> <td>
-                            <button @click="handleUpdateStaff(staff.user_id, staff.name, staff.contact_details)">Update</button>
-                            <button @click="handleBlacklistStaff(staff.user_id)">Toggle Blacklist</button>
-                            <button @click="handleDeleteStaff(staff.user_id)">Delete</button>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-        </section>
-
-        <!-- Only shows up if currentTab is 'bookings' -->
-        <section v-if="currentTab === 'bookings'">
-            <h2>All Bookings</h2>
-            <button @click="fetchBookings" style="margin-bottom: 15px;">Refresh Ledger</button>
-
-            <table border="1" cellpadding="5">
-                <thead>
-                    <tr>
-                        <th>Booking ID</th>
-                        <th>Trek Name</th>
-                        <th>Start Date</th>
-                        <th>Trekker Name</th>
-                        <th>Trekker Email</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr v-for="booking in bookingList" :key="booking.booking_id">
-                        <td>#{{ booking.booking_id }}</td>
-                        <td><strong>{{ booking.trek_name }}</strong></td>
-                        <td>{{ booking.trek_start_date }}</td>
-                        <td>{{ booking.trekker_name }}</td>
-                        <td>{{ booking.trekker_email }}</td>
-                    </tr>
-                </tbody>
-            </table>
-            <p v-if="bookingList.length === 0" style="color: gray; font-style: italic;">
-                No bookings have been made on the platform yet.
-            </p>
-        </section>
-
+        </div>
     </main>
 </template>
+
+<style scoped>
+/* ========================================
+   DASHBOARD FOUNDATION
+======================================== 
+*/
+
+/* This class is applied to the main <main> tag to give the entire 
+screen a soft, professional light-gray background color, making 
+the white content boxes stand out. 
+*/
+.dashboard-bg {
+    background-color: #e9e8f7; 
+    min-height: 100vh; /* Ensures the background stretches to the very bottom of the window */
+}
+
+/* ========================================
+   SIDEBAR NAVIGATION BUTTONS
+======================================== 
+*/
+
+/* This custom class styles the 4 main buttons on the left sidebar.
+Instead of looking like standard clickable buttons, we style them 
+to look like a clean menu list.
+*/
+
+.nav-btn {
+    display: block;          /* Forces each button to drop to a new line */
+    width: 100%;             /* Makes the button stretch across the entire sidebar column */
+    text-align: left;        /* Aligns the text to the left side instead of centering it */
+    padding: 12px 15px;      /* Adds breathing room inside the button (top/bottom, left/right) */
+    margin-bottom: 8px;      /* Adds a small gap between each button */
+    border: 1px solid transparent; /* Invisible border by default to prevent layout shifting later */
+    background-color: transparent; /* Standard white background */
+    color: #495057;          /* A soft dark gray text color */
+    border-radius: 6px;      /* Slightly rounds the corners */
+    transition: 0.2s ease;   /* Makes the hover color change smooth instead of instant */
+    font-weight: 500;        /* Makes the text slightly bolder than normal */
+}
+
+/* When the user hovers their mouse over a sidebar button, 
+change the background slightly so they know it is clickable.
+*/
+.nav-btn:hover {
+    background-color:rgba(255, 255, 255, 0.5); 
+    border-color: #dee2e6; /* Makes the border slightly visible on hover */
+}
+
+/* This class is dynamically applied using Vue's :class binding.
+If the 'currentTab' matches the button, it turns standard Bootstrap Blue 
+so the Admin knows exactly what page they are looking at.
+*/
+.nav-btn.active {
+    background-color: #0d6efd; /* Bootstrap primary blue */
+    color: white;              /* Changes text to white so it contrasts the blue */
+    border-color: #0d6efd;     
+}
+
+/* ========================================
+   TABLE STYLING OVERRIDES
+======================================== 
+*/
+/* We apply this class to our tables to make the headers look a bit more distinct.
+It targets the <th> (Table Header) tags inside any table with the 'custom-table' class.
+*/
+
+.custom-table {
+    background-color: transparent !important;
+}
+
+.custom-table th, .custom-table td {
+    background-color: transparent !important;
+}
+
+/* ========================================
+   SKEUOMORPHIC & GLASSMORPHIC ELEMENTS
+======================================== 
+*/
+
+/* The Raised Card Effect (Skeuomorphism) + Slight Blur (Glassmorphism) */
+.neo-card {
+    /* A very subtle gradient background to give it a glass-like sheen */
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(248, 250, 252, 0.7));
+    backdrop-filter: blur(10px); 
+    border: 1px solid rgba(255, 255, 255, 0.8);
+    border-radius: 15px;
+    
+    /* The magic of Skeuomorphism: 
+       A dark shadow on the bottom-right, and a white highlight on the top-left 
+       makes the card look like a physical object popping out of the screen. */
+    box-shadow: 6px 6px 12px #d1d9e6, -6px -6px 12px #ffffff;
+    transition: transform 0.2s ease-in-out; 
+}
+
+/* Make it float up slightly when you hover over it */
+.neo-card:hover {
+    transform: translateY(-3px);
+}
+
+/* The Embedded Chart Container */
+.neo-inset {
+    background: #f4f6f9;
+    border-radius: 15px;
+    padding: 20px;
+    
+    /* By using 'inset' on the box-shadow, the physical effect is reversed.
+       It looks like a tray carved INTO the screen to hold our charts. */
+    box-shadow: inset 4px 4px 8px #d1d9e6, inset -4px -4px 8px #ffffff;
+}
+
+/* ========================================
+   STRUCTURAL PANELS (Header, Sidebar, Main)
+======================================== 
+*/
+
+/* This creates a structural base for the application. 
+   It is softer than the .neo-card so it doesn't distract the user. */
+.neo-panel {
+    /* A very light, semi-transparent white base */
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.7), rgba(248, 250, 252, 0.5));
+    
+    /* The Glassmorphism blur effect */
+    backdrop-filter: blur(12px); 
+    
+    /* A subtle white border to simulate the edge of a glass pane */
+    border: 1px solid rgba(255, 255, 255, 0.8);
+    border-radius: 16px;
+    
+    /* The Skeuomorphic shadow. Notice the spread (16px) is wider 
+       than the .neo-card (12px). This visually pushes the panel 
+       further down into the desk, making it feel like a heavy foundation. */
+    box-shadow: 8px 8px 16px #d1d9e6, -8px -8px 16px #ffffff;
+}
+</style>

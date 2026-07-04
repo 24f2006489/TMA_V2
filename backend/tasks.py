@@ -182,6 +182,18 @@ def send_monthly_report():
 
     print("📈 Sending HTML report to Admin...")
 
+    # SAVE TO DISK FOR THE ADMIN DASHBOARD
+    #==============================================================
+    report_dir = os.path.join('static', 'reports')
+    os.makedirs(report_dir, exist_ok=True)
+    # Save the file with a timestamp so they pile up historically
+    filename = f"monthly_report_{int(time.time())}.html"
+    filepath = os.path.join(report_dir, filename)
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(html_report)
+    print(f"💾 Report saved to archive: {filepath}")
+    # ==============================================================
     send_email(
         to_address=admin_email,
         subject="📊 TMA Monthly Operations Report",
