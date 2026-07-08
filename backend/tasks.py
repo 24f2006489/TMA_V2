@@ -11,7 +11,7 @@ from flask_sse import sse
 # The @celery_app.task decorator is the magic wand that turns this normal 
 # Python function into a "Background Task" that Redis can queue.
 @celery_app.task
-def export_booking_history_csv(user_id):
+def export_booking_history_csv(user_id, is_admin=False):
     # 1. We add an artificial 5-second delay to simulate heavy processing.
     # This proves that Flask won't freeze while this is running!
     print(f"Chef is starting the CSV export for User {user_id}...")
@@ -51,20 +51,25 @@ def export_booking_history_csv(user_id):
                 trek.start_date.strftime('%Y-%m-%d'),
                 trek.end_date.strftime('%Y-%m-%d')
             ])
-    filepath_url = f"/static/export/{filename}"
+    filepath_url = f"/static/exports/{filename}"
 
-    sse.publish(
-        {
-            "message": "Your CSV export is ready!",
-            "link": filepath_url
-        },
-        type=f"csv_ready_{user_id}"  # <-- THIS IS THE MAGIC SHIELD
-        #By adding that type argument, the backend isn't just screaming into the void.
-        # It is putting a strict label on the message
-        # If Piyush (User ID: 2) asks for a CSV, 
-        # the message goes out labeled specifically as csv_ready_2
-    )
-    print(f"Chef finished! File saved as {filename}. Live notification broadcasted!")
+    if is_admin:
+        sse.publish(
+            {
+                "message": f"CSV export for Trekker #{user_id} is ready!",
+                "link": filepath_url
+            },
+            type="admin_toast" 
+        )
+    else:
+        # SILENT PING: Just tell the Trekker's table to refresh!
+        sse.publish({"message": "refresh_table"}, type=f"trekker_export_{user_id}") # <-- THIS IS THE MAGIC SHIELD
+                    #By adding that type argument, the backend isn't just screaming into the void.
+                    # It is putting a strict label on the message
+                    # If Piyush (User ID: 2) asks for a CSV, 
+                    # the message goes out labeled specifically as csv_ready_2
+        
+    print(f"Chef finished! File saved as {filename}. Table refresh ping sent!")
     return filepath_url
 
 # ==========================================
@@ -99,19 +104,15 @@ def send_daily_reminders():
     print("⏰ Clock-Watcher triggered the Daily Reminder Task!")
 
     trekkers = User.query.filter_by(role='trekker').all()
-    print(f"🔍 Found {len(trekkers)} total trekkers in the database.")
-
     emails_sent = 0
     
     for trekker in trekkers:
-        # Check active status here in Python instead of the database query
         if not trekker.is_active:
             continue
             
         active_bookings = Booking.query.filter_by(user_id=trekker.id, status='Confirmed').all()
         
         if active_bookings:
-            print(f"📧 Drafting email for {trekker.email} ({len(active_bookings)} active bookings)...")
             profile = trekker.trekker_profile
             name = profile.name if profile else "Explorer"
             
@@ -127,10 +128,8 @@ def send_daily_reminders():
                 message=email_body
             )
             emails_sent += 1
-        else:
-            print(f"⏭️ Skipping {trekker.email} - No confirmed bookings.")
             
-    return f"Daily reminders successfully sent to {emails_sent} trekkers!"
+    return f"Daily reminders successfully sent to {emails_sent} trekkers via email!"
 
 @celery_app.task
 def send_monthly_report():
@@ -202,3 +201,11 @@ def send_monthly_report():
     )
 
     return "Monthly report generated and sent successfully."
+
+@celery_app.task
+def send_sse_heartbeat():
+    # This sends a tiny, invisible pulse through the radio tower.
+    # Because the 'type' is 'heartbeat', the Vue frontend will completely ignore it,
+    # but the physical connection will remain permanently open!
+    sse.publish({"status": "alive"}, type="heartbeat")
+    return "Heartbeat pulse sent."

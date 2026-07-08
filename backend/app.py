@@ -24,6 +24,7 @@ app.config['JWT_SECRET_KEY'] = 'tma_production_jwt_secret_9988_extra_secure' # M
 # ==========================================
 #  SSE REDIS CONFIG 
 # ==========================================
+# ADDED ?health_check_interval=15 to act as a heartbeat and prevent Socket Timeouts!
 app.config['REDIS_URL'] = 'redis://localhost:6379/2'
 
 # ==========================================
@@ -193,7 +194,7 @@ def get_admin_stats():
     total_trekkers = User.query.filter_by(role='trekker').count()
     total_staffs = User.query.filter_by(role='staff').count()
     total_treks = Trek.query.count()
-    total_bookings = Booking.query.count()
+    total_bookings = Booking.query.filter_by(status='Confirmed').count()
     
     return jsonify({
         "total_trekkers": total_trekkers,
@@ -853,7 +854,7 @@ def admin_trigger_csv_export(user_id):
     from tasks import export_booking_history_csv
 
     # 3. Pin the ticket to the Celery board!
-    export_booking_history_csv.delay(user_id)
+    export_booking_history_csv.delay(user_id, is_admin=True)
 
     # 4. Immediately return to the Admin without freezing the dashboard
     return jsonify({
@@ -877,7 +878,8 @@ def get_all_global_bookings():
             "trek_start_date": b.trek.start_date.strftime('%Y-%m-%d'),
             "user_id": b.user_id,
             "trekker_name": profile.name if profile else "Unknown",
-            "trekker_email": b.user.email
+            "trekker_email": b.user.email,
+            "status": b.status
         })
     return jsonify({
         "total_global_booking": len(results),
@@ -911,6 +913,24 @@ def toggle_user_status(user_id):
 # TREKKERS ROUTES 
 # ==========================================
 
+@app.route('/trekker/profile', methods=['GET'])
+@role_required(['trekker'])
+def get_trekker_profile():
+    user_id = int(get_jwt_identity())
+    user = User.query.get(user_id)
+    
+    if not user or not user.trekker_profile:
+        return jsonify({"msg": "Profile not found"}), 404
+        
+    profile = user.trekker_profile
+    
+    return jsonify({
+        "email": user.email,
+        "name": profile.name,
+        "contact_details": profile.contact_details,
+        "emergency_contact": profile.emergency_contact
+    }), 200
+
 @app.route('/trekker/profile', methods=['PUT'])
 @role_required(['trekker'])
 def update_trekker_profile():
@@ -937,6 +957,15 @@ def update_trekker_profile():
     # 4. Save Changes
     try:
         db.session.commit()
+
+        # --- INSTANT SSE BROADCAST ---
+        sse.publish(
+            {
+                "message": f"Trekker ID #{user_id} just updated their profile!",
+            },
+            type="admin_dashboard_update"
+        )
+
     except Exception as e:
         db.session.rollback()
         return jsonify({"msg": "Database error occurred while updating profile."}), 500
@@ -957,7 +986,10 @@ def view_open_treks():
     search_difficulty = request.args.get('difficulty')
     search_duration = request.args.get('duration')
 
-    query = Trek.query.filter(Trek.status == 'Open', Trek.available_slots > 0)
+    query = Trek.query.filter(
+        Trek.status.in_(['Approved', 'Open']), 
+        Trek.available_slots > 0
+    )
 
     if search_location:
         # ilike() makes it case-insensitive. The % symbols act as wildcards.
@@ -996,7 +1028,7 @@ def view_open_treks():
     }), 200
 
 @app.route('/book', methods=['POST'])
-@role_required(['trekker']) # ONLY trekkers can hit this route!
+@role_required(['trekker']) 
 def book_trek():
     data = request.get_json()
     trek_id = data.get('trek_id')
@@ -1004,35 +1036,37 @@ def book_trek():
     if not trek_id:
         return jsonify({"msg": "Please provide a trek_id to book"}), 400
         
-    # 1. Securely identify WHO is making the request using their Token
     user_id = int(get_jwt_identity()) 
     
-    # 2. Find the requested Trek
     target_trek = Trek.query.get(trek_id)
     if not target_trek:
         return jsonify({"msg": "Trek not found"}), 404
         
-    if target_trek.status != 'Open':
+    if target_trek.status not in ['Open', 'Approved']:
         return jsonify({"msg": "This trek is not currently open for booking"}), 400
         
     if target_trek.available_slots <= 0:
         return jsonify({"msg": "Sorry, this trek is fully booked!"}), 400
         
     # ==========================================
-    # 3. EDGE CASE 1: Prevent Double Booking
+    # Prevent Double Booking
     # ==========================================
-    existing_booking = Booking.query.filter_by(user_id=user_id, trek_id=trek_id).first()
+    # FIX: We explicitly filter for 'Confirmed' bookings.
+    # If they only have a 'Cancelled' booking for this trek, this returns None, allowing them to re-book!
+    existing_booking = Booking.query.filter_by(user_id=user_id, trek_id=trek_id, status='Confirmed').first()
     if existing_booking:
-        return jsonify({"msg": "You have already booked a ticket for this trek!"}), 409
+        return jsonify({"msg": "You have already booked an active ticket for this trek!"}), 409
         
     # ==========================================
-    # 4. EDGE CASE 2: Prevent Overlapping Dates
+    # Prevent Overlapping Dates
     # ==========================================
-    # We join the Trek and Booking tables to find existing trips for this specific user
+    # FIX: We add `Booking.status == 'Confirmed'` to the database query itself.
+    # This guarantees cancelled treks are completely ignored when checking for calendar overlaps.
     overlapping_trek = Trek.query.join(Booking).filter(
         Booking.user_id == user_id,
-        Trek.end_date > target_trek.start_date, # Existing ends AFTER new one starts
-        Trek.start_date < target_trek.end_date  # Existing starts BEFORE new one ends
+        Booking.status == 'Confirmed',  # <-- This line solves the overlap bug!
+        Trek.end_date > target_trek.start_date, 
+        Trek.start_date < target_trek.end_date  
     ).first()
     
     if overlapping_trek:
@@ -1041,9 +1075,9 @@ def book_trek():
         }), 409
 
     # ==========================================
-    # 5. Execute the Transaction
+    # Execute the Transaction
     # ==========================================
-    new_booking = Booking(user_id=user_id, trek_id=trek_id)
+    new_booking = Booking(user_id=user_id, trek_id=trek_id, status='Confirmed')
     
     # Inventory Management: Decrease available slots by 1
     target_trek.available_slots -= 1 
@@ -1055,8 +1089,7 @@ def book_trek():
 
         # --- CACHE INVALIDATION ---
         cache.clear()
-        cache.delete_memoized('get_trek_participants', target_trek.id) # Surgically deletes ONLY this trek's staff roster cache!
-
+        
         # ---SSE BROADCAST FOR ADMIN---
         sse.publish(
             {
@@ -1067,9 +1100,8 @@ def book_trek():
             },
             type="admin_dashboard_update"
         )
-        # ------------------------------------
 
-        # ---- Filterd SSE BROADCAST FOR STAFF---
+        # ---- Filtered SSE BROADCAST FOR STAFF---
         if target_trek.assigned_staff_id:
             sse.publish(
                 {
@@ -1110,7 +1142,7 @@ def get_my_booking():
             "start_date": trek.start_date.strftime('%Y-%m-%d'),
             "end_date": trek.end_date.strftime('%Y-%m-%d'),
             "duration": trek.duration,
-            "status": trek.status
+            "status": booking.status
         })
 
     return jsonify({
@@ -1148,7 +1180,16 @@ def cancel_booking(booking_id):
 
         # --- CACHE INVALIDATION ---
         cache.clear()
-        cache.delete_memoized('get_trek_participants', trek.id) # <-- NEW: Keep staff rosters accurate!
+
+        # --- SSE BROADCAST FOR ADMIN ---
+        sse.publish(
+            {
+                "message": f"A booking was cancelled for {trek.name}!",
+                "trek_id": trek.id,
+                "new_available_slots": trek.available_slots
+            },
+            type="admin_dashboard_update"
+        )
 
     except Exception as e:
         db.session.rollback()
@@ -1172,13 +1213,51 @@ def trigger_csv_export():
 
     # Pin the ticket to the board! 
     # The .delay() command is what sends this to Redis instead of running it here .
-    export_booking_history_csv.delay(user_id)
+    export_booking_history_csv.delay(user_id, is_admin=False)
 
     # Immediately return to the user without waiting for the file to generate
     return jsonify({
         "msg": "Your CSV export has started in the background! We will notify you when it is ready.",
         "status": "processing"
     }), 202
+
+@app.route('/trekker/exports', methods=['GET'])
+@role_required(['trekker'])
+def get_trekker_exports():
+    import os
+    from datetime import datetime
+    
+    user_id = int(get_jwt_identity())
+    export_dir = os.path.join('static', 'exports')
+    
+    # If the folder hasn't been created yet, return an empty list
+    if not os.path.exists(export_dir):
+        return jsonify({"exports": []}), 200
+        
+    exports = []
+    
+    # The prefix ensures trekkers can ONLY see their own files
+    file_prefix = f"booking_history_user_{user_id}_"
+    
+    for filename in os.listdir(export_dir):
+        if filename.startswith(file_prefix) and filename.endswith('.csv'):
+            filepath = os.path.join(export_dir, filename)
+            
+            # Get the actual file creation time from the operating system
+            timestamp = os.path.getmtime(filepath)
+            date_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            
+            exports.append({
+                "filename": filename,
+                "date_created": date_str,
+                "url": f"/static/exports/{filename}"
+            })
+            
+    # Sort so the newest files are always at the top of the table
+    exports.sort(key=lambda x: x['date_created'], reverse=True)
+    
+    return jsonify({"exports": exports}), 200
+
 # ==========================================
 # STAFF ROUTES (Phase 6)
 # ==========================================

@@ -4,6 +4,11 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import axios from 'axios'
 
+
+// --------- Import Component-------
+import NeoCard from '../components/NeoCard.vue'
+
+
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
@@ -86,24 +91,31 @@ onUnmounted(() => {
                 </div>
             </div>
 
+            <!-- STATS (Componentized) -->
             <div class="row g-4 mb-4">
                 <div class="col-md-4">
-                    <div class="neo-card text-center p-4 border-start border-4 border-secondary">
-                        <h2 class="text-secondary display-5 fw-bold">{{ details.stats.total_completed }}</h2>
-                        <p class="text-muted fw-bold mb-0">Total Completed Treks</p>
-                    </div>
+                    <NeoCard 
+                        :value="details.stats.total_completed" 
+                        label="Total Completed Treks" 
+                        textColorClass="text-secondary"
+                        borderClass="border-start border-4 border-secondary"
+                    />
                 </div>
                 <div class="col-md-4">
-                    <div class="neo-card text-center p-4 border-start border-4 border-success">
-                        <h2 class="text-success display-5 fw-bold">{{ details.stats.currently_active }}</h2>
-                        <p class="text-muted fw-bold mb-0">Currently Active Treks</p>
-                    </div>
+                    <NeoCard 
+                        :value="details.stats.currently_active" 
+                        label="Currently Active Treks" 
+                        textColorClass="text-success"
+                        borderClass="border-start border-4 border-success"
+                    />
                 </div>
                 <div class="col-md-4">
-                    <div class="neo-card text-center p-4 border-start border-4 border-primary">
-                        <h2 class="text-primary display-5 fw-bold">{{ details.stats.total_upcoming }}</h2>
-                        <p class="text-muted fw-bold mb-0">Upcoming Assignments</p>
-                    </div>
+                    <NeoCard 
+                        :value="details.stats.total_upcoming" 
+                        label="Upcoming Assignments" 
+                        textColorClass="text-primary"
+                        borderClass="border-start border-4 border-primary"
+                    />
                 </div>
             </div>
 
@@ -182,8 +194,6 @@ onUnmounted(() => {
 .custom-table { background-color: transparent !important; }
 .custom-table th, .custom-table td { background-color: transparent !important; }
 .custom-table th { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.5px; color: #6c757d; }
-.neo-card { background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(248, 250, 252, 0.7)); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.8); border-radius: 15px; box-shadow: 6px 6px 12px #d1d9e6, -6px -6px 12px #ffffff; transition: transform 0.2s ease-in-out; }
-.neo-card:hover { transform: translateY(-3px); }
 .neo-inset { background: #f4f6f9; border-radius: 15px; padding: 20px; box-shadow: inset 4px 4px 8px #d1d9e6, inset -4px -4px 8px #ffffff; }
 .neo-panel { background: linear-gradient(135deg, rgba(255, 255, 255, 0.7), rgba(248, 250, 252, 0.5)); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.8); border-radius: 16px; box-shadow: 8px 8px 16px #d1d9e6, -8px -8px 16px #ffffff; }
 </style>

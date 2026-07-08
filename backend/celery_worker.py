@@ -19,6 +19,10 @@ celery_app = Celery(
 celery_app.conf.timezone = 'Asia/Kolkata'
 
 celery_app.conf.beat_schedule = {
+    'sse-heartbeat': {
+        'task': 'tasks.send_sse_heartbeat',
+        'schedule': 15.0, # Runs every 15 seconds
+    },
     'daily-reminder-job': {
         'task': 'tasks.send_daily_reminders',
         # For testing purposes, we are setting this to run EVERY MINUTE.

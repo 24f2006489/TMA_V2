@@ -1,8 +1,14 @@
 <script setup>
-import { ref,onMounted, computed } from 'vue'
+import { ref,onMounted, computed, onUnmounted } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useRouter } from 'vue-router'
+
+
+//-----Import Componets-------
+import NeoCard from '../components/NeoCard.vue'
+
+
 
 // --- CHART.JS IMPORTS ---
 import { Bar, Doughnut } from 'vue-chartjs'
@@ -59,6 +65,62 @@ const chartOptions = {
         legend: { position: 'bottom' }
     }
 }
+
+
+
+// ==========================================
+// REAL-TIME LISTENER (With Auto-Fallback)
+// ==========================================
+let sseConnection = null;
+let fallbackRadar = null; // Will hold our backup polling interval
+
+const setupRealTimeUpdates = () => {
+    console.log("⏳ Tuning the radio to Flask SSE Stream...")
+    sseConnection = new EventSource('http://127.0.0.1:5000/stream')
+
+    sseConnection.onopen = () => {
+        console.log("✅ SSE Radio Connected Successfully!")
+    }
+
+    // THE SHIELD: Graceful Degradation
+    sseConnection.onerror = (err) => {
+        console.warn("⚠️ SSE Stream interrupted. Switching to Radar Sweep (Polling Backup)...")
+        
+        // 1. Shut down the broken radio to stop the infinite error loop!
+        sseConnection.close() 
+
+        // 2. Start the Radar Sweep (Fetch new data every 3 seconds)
+        if (!fallbackRadar) {
+            fallbackRadar = setInterval(() => {
+                // Silently refresh the critical numbers in the background
+                fetchStats()
+                fetchBookings()
+                fetchTreks()
+                fetchTrekkers()
+            }, 3000)
+        }
+    }
+
+    sseConnection.addEventListener('admin_dashboard_update', (event) => {
+        const incomingData = JSON.parse(event.data)
+        console.log("📡 INCOMING BROADCAST RECEIVED:", incomingData)
+
+        // Visual update for slots (only runs if it was a booking event)
+        if (incomingData.trek_id) {
+            const trek = trekList.value.find(t => t.id === incomingData.trek_id)
+            if (trek) {
+                trek.available_slots = incomingData.new_available_slots
+            }
+        }
+
+        setTimeout(() => {
+            fetchStats()
+            fetchBookings()
+            fetchTrekkers()
+        }, 500)
+    })
+}
+
 
 // Staff STATE
 const staffList = ref([])
@@ -434,6 +496,13 @@ onMounted(() => {
     fetchBookings()
     fetchTrekkers()
     fetchReports()
+    setupRealTimeUpdates()
+})
+
+// Make sure we destroy the backup radar when we log out!
+onUnmounted(() => {
+    if (sseConnection) sseConnection.close()
+    if (fallbackRadar) clearInterval(fallbackRadar) 
 })
 
 const handleLogout = () => {
@@ -474,31 +543,35 @@ const handleLogout = () => {
                             <p v-if="errorMessage" class="text-danger">{{ errorMessage }}</p>
 
                             <div v-if="stats">
-                                <!-- THE SKEUO-GLASS NUMBER CARDS -->
+                                <!-- THE SKEUO-GLASS NUMBER CARDS (using Components) -->
                                 <div class="row g-4 mb-5">
                                     <div class="col-md-6 col-lg-3">
-                                        <div class="neo-card text-center p-4">
-                                            <h2 class="text-primary display-5 fw-bold">{{ stats.total_treks }}</h2>
-                                            <p class="text-muted fw-bold mb-0">Total Treks</p>
-                                        </div>
+                                        <NeoCard 
+                                            :value="stats.total_treks" 
+                                            label="Total Treks" 
+                                            textColorClass="text-primary" 
+                                        />
                                     </div>
                                     <div class="col-md-6 col-lg-3">
-                                        <div class="neo-card text-center p-4">
-                                            <h2 class="text-success display-5 fw-bold">{{ stats.total_trekkers }}</h2>
-                                            <p class="text-muted fw-bold mb-0">Trekkers</p>
-                                        </div>
+                                        <NeoCard 
+                                            :value="stats.total_trekkers" 
+                                            label="Trekkers" 
+                                            textColorClass="text-success" 
+                                        />
                                     </div>
                                     <div class="col-md-6 col-lg-3">
-                                        <div class="neo-card text-center p-4">
-                                            <h2 class="text-warning display-5 fw-bold">{{ stats.total_staffs }}</h2>
-                                            <p class="text-muted fw-bold mb-0">Staff Members</p>
-                                        </div>
+                                        <NeoCard 
+                                            :value="stats.total_staffs" 
+                                            label="Staff Members" 
+                                            textColorClass="text-warning" 
+                                        />
                                     </div>
                                     <div class="col-md-6 col-lg-3">
-                                        <div class="neo-card text-center p-4">
-                                            <h2 class="text-info display-5 fw-bold">{{ stats.total_bookings }}</h2>
-                                            <p class="text-muted fw-bold mb-0">Total Bookings</p>
-                                        </div>
+                                        <NeoCard 
+                                            :value="stats.total_bookings" 
+                                            label="Total Bookings" 
+                                            textColorClass="text-info" 
+                                        />
                                     </div>
                                 </div>
 
@@ -857,6 +930,7 @@ const handleLogout = () => {
                                             <th>Start Date</th>
                                             <th>Trekker Name</th>
                                             <th>Contact Email</th>
+                                            <th class="text-center">Status</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -872,6 +946,13 @@ const handleLogout = () => {
                                             
                                             <td>
                                                 <a :href="'mailto:' + booking.trekker_email" class="text-decoration-none fw-bold">{{ booking.trekker_email }}</a>
+                                            </td>
+
+                                            <td class="text-center">
+                                                <span class="badge rounded-pill px-3" 
+                                                      :class="booking.status === 'Confirmed' ? 'bg-success' : 'bg-danger'">
+                                                    {{ booking.status }}
+                                                </span>
                                             </td>
                                         </tr>
                                     </tbody>
@@ -1005,26 +1086,6 @@ It targets the <th> (Table Header) tags inside any table with the 'custom-table'
    SKEUOMORPHIC & GLASSMORPHIC ELEMENTS
 ======================================== 
 */
-
-/* The Raised Card Effect (Skeuomorphism) + Slight Blur (Glassmorphism) */
-.neo-card {
-    /* A very subtle gradient background to give it a glass-like sheen */
-    background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(248, 250, 252, 0.7));
-    backdrop-filter: blur(10px); 
-    border: 1px solid rgba(255, 255, 255, 0.8);
-    border-radius: 15px;
-    
-    /* The magic of Skeuomorphism: 
-       A dark shadow on the bottom-right, and a white highlight on the top-left 
-       makes the card look like a physical object popping out of the screen. */
-    box-shadow: 6px 6px 12px #d1d9e6, -6px -6px 12px #ffffff;
-    transition: transform 0.2s ease-in-out; 
-}
-
-/* Make it float up slightly when you hover over it */
-.neo-card:hover {
-    transform: translateY(-3px);
-}
 
 /* The Embedded Chart Container */
 .neo-inset {

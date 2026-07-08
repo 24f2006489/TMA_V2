@@ -16,6 +16,11 @@ const router = createRouter({
       component: LoginView
     },
     {
+      path:'/register',
+      name: 'register',
+      component: () => import('../views/RegisterView.vue')
+    },
+    {
       path: '/admin-dashboard',
       name: 'admin-dashboard',
       component: AdminDashboardView,
@@ -25,6 +30,11 @@ const router = createRouter({
       path: '/admin/staff/:id', // The :id makes this dynamic!
       name: 'staff-details',
       component: () => import('../views/StaffDetailView.vue')
+    },
+    {
+      path: '/trekker-dashboard',
+      name: 'trekker-dashboard',
+      component: () => import('../views/TrekkerDashboardView.vue')
     },
   ]
 })
