@@ -14,6 +14,9 @@ class User(db.Model):
     is_active = db.Column(db.Boolean, default=True)
 
     # Relationship link to Trekker profile
+    #By default, relationship() assumes multiple related records might exist 
+    # and stores them in a Python list. 
+    # Setting uselist=False forces it to act as a scalar (a single, direct attribute)
     trekker_profile = db.relationship('TrekkerProfile', backref='user', uselist=False)
 
     # Relationship link to staff profile

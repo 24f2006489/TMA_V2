@@ -29,7 +29,7 @@ const stats = ref(null)         // Holds the data from Flask
 const errorMessage = ref('')   // Holds any error message
 
 // --- CHART DATA GENERATORS ---
-// 1. Doughnut Chart: Compares the types of users on the platform
+// Doughnut Chart: Compares the types of users on the platform
 const userDemographicsData = computed(() => {
     if (!stats.value) return null;
     return {
@@ -43,7 +43,7 @@ const userDemographicsData = computed(() => {
     }
 })
 
-// 2. Bar Chart: Platform Activity
+// Bar Chart: Platform Activity
 const platformActivityData = computed(() => {
     if (!stats.value) return null;
     return {
@@ -68,8 +68,8 @@ const chartOptions = {
 
 
 
-// ==========================================
-// REAL-TIME LISTENER (With Auto-Fallback)
+// ==============================
+// REAL-TIME LISTENER 
 // ==========================================
 let sseConnection = null;
 let fallbackRadar = null; // Will hold our backup polling interval
@@ -86,10 +86,10 @@ const setupRealTimeUpdates = () => {
     sseConnection.onerror = (err) => {
         console.warn("⚠️ SSE Stream interrupted. Switching to Radar Sweep (Polling Backup)...")
         
-        // 1. Shut down the broken radio to stop the infinite error loop!
+        // Shut down the broken radio to stop the infinite error loop!
         sseConnection.close() 
 
-        // 2. Start the Radar Sweep (Fetch new data every 3 seconds)
+        // Start the Radar Sweep (Fetch new data every 3 seconds)
         if (!fallbackRadar) {
             fallbackRadar = setInterval(() => {
                 // Silently refresh the critical numbers in the background
@@ -178,7 +178,7 @@ const reportList = ref([])
 
 
 
-// 2. ACTIONS
+// ACTIONS
 
 // Stats Action
 const fetchStats = async () => {
@@ -318,25 +318,64 @@ const handleCreateTrek = async () => {
     }
 }
 
-const handleUpdateTrek = async (trek) => {
-    // For raw testing, we will just prompt for Name and Difficulty.
-    // Remember: Your backend blocks updating dates/location if bookings exist!
-    const newName = prompt("Update Trek Name:", trek.name)
-    if (newName === null) return; 
 
-    const newDifficulty = prompt("Update Difficulty (Easy/Moderate/Hard):", trek.difficulty)
-    if (newDifficulty === null) return;
+// Edit Trek Details
+const isEditTrekModalOpen = ref(false)
+const editingTrek = ref({
+    id: null,
+    name: '',
+    location: '',
+    difficulty: 'Moderate',
+    duration: 1,
+    start_date: '',
+    end_date: ''
+})
+
+const openEditTrekModal = (trek) => {
+    // Clone the trek data into the form so we don't accidentally mutate the table before saving
+    editingTrek.value = { ...trek }
+    isEditTrekModalOpen.value = true
+}
+
+const closeEditTrekModal = () => {
+    isEditTrekModalOpen.value = false
+}
+
+const submitEditTrek = async () => {
+    const originalTrek = trekList.value.find(t => t.id === editingTrek.value.id)
+
+    const payload = {}
+    
+    if (editingTrek.value.name !== originalTrek.name) payload.name = editingTrek.value.name;
+    if (editingTrek.value.difficulty !== originalTrek.difficulty) payload.difficulty = editingTrek.value.difficulty;
+    
+    // Explicitly handle date strings to ensure they match YYYY-MM-DD
+    if (editingTrek.value.location !== originalTrek.location) payload.location = editingTrek.value.location;
+    if (parseInt(editingTrek.value.duration) !== parseInt(originalTrek.duration)) payload.duration = parseInt(editingTrek.value.duration);
+    
+    // Ensure dates are strings in YYYY-MM-DD format
+    if (editingTrek.value.start_date !== originalTrek.start_date) payload.start_date = editingTrek.value.start_date;
+    if (editingTrek.value.end_date !== originalTrek.end_date) payload.end_date = editingTrek.value.end_date;
+
+    if (Object.keys(payload).length === 0) {
+        closeEditTrekModal();
+        return;
+    }
 
     try {
-        const response = await axios.put(`http://127.0.0.1:5000/admin/trek/${trek.id}`, {
-            name: newName,
-            difficulty: newDifficulty
-        }, {
-            headers: { Authorization: `Bearer ${authStore.token}` }
+        // Explicitly set the headers to ensure Flask's request.get_json() recognizes the data
+        const response = await axios.put(`http://127.0.0.1:5000/admin/trek/${editingTrek.value.id}`, payload, {
+            headers: { 
+                'Authorization': `Bearer ${authStore.token}`,
+                'Content-Type': 'application/json' 
+            }
         })
         alert(response.data.msg)
-        fetchTreks() // Refresh the table
+        fetchTreks() 
+        closeEditTrekModal()
     } catch (error) {
+        // This will print the actual error from Flask in your console
+        console.error("Backend Error:", error.response?.data);
         alert(error.response?.data?.msg || "Error updating trek")
     }
 }
@@ -371,9 +410,9 @@ const handleEmergencyCancel = async (trekId) => {
     }
 }
 
-// ==========================================
+// =============================
 // STAFF ASSIGNMENT LOGIC
-// ==========================================
+// ==================  ==========
 const activeAssignmentTrek = ref(null)  // Holds the trek we are currently assigning
 const availableStaffList = ref([])      // Holds the filtered list from Flask
 const selectedStaffId = ref('')         // Holds the ID chosen from the dropdown
@@ -687,6 +726,7 @@ const handleLogout = () => {
                                                 <span class="badge rounded-pill px-3"
                                                       :class="{
                                                           'bg-success': trek.status === 'Approved',
+                                                          'bg-primary': trek.status === 'Open',
                                                           'bg-warning text-dark': trek.status === 'Pending',
                                                           'bg-danger': trek.status === 'Canceled',
                                                           'bg-secondary': trek.status === 'Closed' || trek.status === 'Completed'
@@ -701,7 +741,7 @@ const handleLogout = () => {
                                             
                                             <td class="text-center">
                                                 <div class="d-flex flex-nowrap justify-content-center gap-2">
-                                                    <button class="btn btn-sm btn-outline-secondary rounded-pill px-3 fw-bold" @click="handleUpdateTrek(trek)">Edit</button>
+                                                    <button class="btn btn-sm btn-outline-secondary rounded-pill px-3 fw-bold" @click="openEditTrekModal(trek)">Edit</button>
                                                     <button class="btn btn-sm btn-primary rounded-pill px-3 fw-bold" @click="openAssignmentTool(trek)">Assign</button>
                                                     <button class="btn btn-sm btn-outline-warning rounded-pill px-3 fw-bold" @click="handleEmergencyCancel(trek.id)">Cancel</button>
                                                     <button class="btn btn-sm btn-outline-danger rounded-pill px-3 fw-bold" @click="handleDeleteTrek(trek.id)">Delete</button>
@@ -1006,33 +1046,71 @@ const handleLogout = () => {
                 </div>
             </div>
         </div>
+
+
+        <!-- ================================= -->
+        <!-- EDIT Trek Modal Overlay -->
+        <!-- ===================== -->
+        <div v-if="isEditTrekModalOpen" style="position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(5px); display: flex; justify-content: center; align-items: center; z-index: 1050;">
+            <div class="neo-panel p-4" style="width: 90%; max-width: 700px; background: white;">
+                
+                <div class="d-flex justify-content-between align-items-center mb-4 border-bottom pb-2">
+                    <h4 class="mb-0 text-dark fw-bold">Edit Trek Route</h4>
+                    <button class="btn btn-sm btn-outline-danger fw-bold rounded-pill px-3" @click="closeEditTrekModal">Close</button>
+                </div>
+
+                <form @submit.prevent="submitEditTrek" class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold text-secondary mb-1">Trek Name</label>
+                        <input type="text" class="form-control" v-model="editingTrek.name" required />
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold text-secondary mb-1">Location</label>
+                        <input type="text" class="form-control" v-model="editingTrek.location" required />
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold text-secondary mb-1">Difficulty</label>
+                        <select class="form-select" v-model="editingTrek.difficulty">
+                            <option value="Easy">Easy</option>
+                            <option value="Moderate">Moderate</option>
+                            <option value="Hard">Hard</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold text-secondary mb-1">Start Date</label>
+                        <input type="date" class="form-control" v-model="editingTrek.start_date" required />
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold text-secondary mb-1">End Date</label>
+                        <input type="date" class="form-control" v-model="editingTrek.end_date" required />
+                    </div>
+                    <div class="col-md-4 mt-3">
+                        <label class="form-label fw-bold text-secondary mb-1">Duration (Days)</label>
+                        <input type="number" min="1" class="form-control" v-model="editingTrek.duration" required />
+                    </div>
+                    
+                    <div class="col-12 mt-4 text-end">
+                        <button type="submit" class="btn btn-primary fw-bold px-4 py-2 rounded-pill shadow-sm">Save Changes</button>
+                    </div>
+                </form>
+
+                <div class="alert alert-warning mt-4 mb-0 border-0 shadow-sm" style="font-size: 0.85rem;">
+                    <strong>Security Notice:</strong> If this expedition already has active bookings, the system will strictly block any changes to its Location, Duration, or Dates to protect the trekkers' schedules. You may still correct typos in the Name or Difficulty.
+                </div>
+
+            </div>
+        </div>
+
+
     </main>
 </template>
 
 <style scoped>
-/* ========================================
-   DASHBOARD FOUNDATION
-======================================== 
-*/
 
-/* This class is applied to the main <main> tag to give the entire 
-screen a soft, professional light-gray background color, making 
-the white content boxes stand out. 
-*/
 .dashboard-bg {
     background-color: #e9e8f7; 
     min-height: 100vh; /* Ensures the background stretches to the very bottom of the window */
 }
-
-/* ========================================
-   SIDEBAR NAVIGATION BUTTONS
-======================================== 
-*/
-
-/* This custom class styles the 4 main buttons on the left sidebar.
-Instead of looking like standard clickable buttons, we style them 
-to look like a clean menu list.
-*/
 
 .nav-btn {
     display: block;          /* Forces each button to drop to a new line */
@@ -1055,24 +1133,13 @@ change the background slightly so they know it is clickable.
     background-color:rgba(255, 255, 255, 0.5); 
     border-color: #dee2e6; /* Makes the border slightly visible on hover */
 }
-
-/* This class is dynamically applied using Vue's :class binding.
-If the 'currentTab' matches the button, it turns standard Bootstrap Blue 
-so the Admin knows exactly what page they are looking at.
-*/
 .nav-btn.active {
-    background-color: #0d6efd; /* Bootstrap primary blue */
-    color: white;              /* Changes text to white so it contrasts the blue */
+    background-color: #0d6efd; 
+    color: white;
     border-color: #0d6efd;     
 }
 
-/* ========================================
-   TABLE STYLING OVERRIDES
-======================================== 
-*/
-/* We apply this class to our tables to make the headers look a bit more distinct.
-It targets the <th> (Table Header) tags inside any table with the 'custom-table' class.
-*/
+
 
 .custom-table {
     background-color: transparent !important;
@@ -1082,10 +1149,6 @@ It targets the <th> (Table Header) tags inside any table with the 'custom-table'
     background-color: transparent !important;
 }
 
-/* ========================================
-   SKEUOMORPHIC & GLASSMORPHIC ELEMENTS
-======================================== 
-*/
 
 /* The Embedded Chart Container */
 .neo-inset {
@@ -1098,13 +1161,6 @@ It targets the <th> (Table Header) tags inside any table with the 'custom-table'
     box-shadow: inset 4px 4px 8px #d1d9e6, inset -4px -4px 8px #ffffff;
 }
 
-/* ========================================
-   STRUCTURAL PANELS (Header, Sidebar, Main)
-======================================== 
-*/
-
-/* This creates a structural base for the application. 
-   It is softer than the .neo-card so it doesn't distract the user. */
 .neo-panel {
     /* A very light, semi-transparent white base */
     background: linear-gradient(135deg, rgba(255, 255, 255, 0.7), rgba(248, 250, 252, 0.5));
@@ -1116,9 +1172,6 @@ It targets the <th> (Table Header) tags inside any table with the 'custom-table'
     border: 1px solid rgba(255, 255, 255, 0.8);
     border-radius: 16px;
     
-    /* The Skeuomorphic shadow. Notice the spread (16px) is wider 
-       than the .neo-card (12px). This visually pushes the panel 
-       further down into the desk, making it feel like a heavy foundation. */
     box-shadow: 8px 8px 16px #d1d9e6, -8px -8px 16px #ffffff;
 }
 </style>

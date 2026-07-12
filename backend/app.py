@@ -288,15 +288,15 @@ def delete_staff(staff_id):
     if not target_user or target_user.role != 'staff':
         return jsonify({"msg": "Staff member not found."}), 404
         
-    # 1. Fetch all active treks assigned to this staff member
+    # Fetch all active treks assigned to this staff member
     active_treks = Trek.query.filter(
         Trek.assigned_staff_id == staff_id,
         Trek.status.in_(['Approved', 'Open', 'Closed'])
     ).all()
     
-    # ==========================================
-    # 2. THE BOOKING SHIELD (Validation Pass)
-    # ==========================================
+    # ============
+    # (Validation Pass)
+    # ======================
     # If even ONE trek has a booking, the entire deletion is blocked.
     for trek in active_treks:
         if len(trek.bookings) > 0:
@@ -304,23 +304,23 @@ def delete_staff(staff_id):
                 "msg": f"Action Denied: Cannot delete this staff member. The trek '{trek.name}' they are assigned to already has {len(trek.bookings)} booking(s)."
             }), 400
             
-    # ==========================================
-    # 3. THE CASCADE REVERT (Mutation Pass)
-    # ==========================================
-    # If we made it past the shield, it means 0 bookings exist.
+    # ============  =====
+    # Mutation Pass)
+    # =========================
+    # If we made it past the validation, it means 0 bookings exist.
     # We detach the staff and revert the treks to the empty 'Pending' state.
     for trek in active_treks:
         trek.assigned_staff_id = None
         trek.status = 'Pending'
         
-    # 4. Safe to Delete the Staff Member
+    # Safe to Delete the Staff Member
     profile = target_user.staff_profile
     if profile:
         db.session.delete(profile)
         
     db.session.delete(target_user)
     
-    # 5. Commit everything simultaneously
+    # Commit everything simultaneously
     try:
         db.session.commit()
     except Exception as e:
@@ -338,13 +338,13 @@ def delete_staff(staff_id):
 def create_trek():
     data = request.get_json()
 
-    # 1. Validate Core Input
+    # Validate Core Input
     required_fields = ['name', 'location', 'difficulty', 'duration', 'available_slots', 'start_date', 'end_date']
     for field in required_fields:
         if not data or field not in data:
             return jsonify({"msg": f"Missing required field: {field}"}), 400
 
-    # 2. Translate Strings to Date Objects
+    # Translate Strings to Date Objects
     try:
         start_d = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
         end_d = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
@@ -354,8 +354,8 @@ def create_trek():
     # .get() is safe! If they don't provide a staff ID yet, it just defaults to None
     staff_id = data.get('assigned_staff_id')
 
-    # ==========================================
-    # 3. THE COLLISION BOX (10-Day Buffer Logic)
+    # ============ ==========
+    # THE COLLISION BOX (10-Day Buffer Logic)
     # ==========================================
 
     if staff_id:
@@ -376,9 +376,9 @@ def create_trek():
                 "msg": f"Schedule Conflict: Staff is assigned to '{overlapping_trek.name}' ({overlapping_trek.start_date} to {overlapping_trek.end_date}). Violates 10-day buffer."
             }), 409
 
-    # ==========================================
-    # 4. Build and Save the Trek
-    # ==========================================
+    # ===   =======  =====
+    # Build and Save the Trek
+    # ========================= =========
         
     # If a staff_id exists, status is Approved. Otherwise, it stays Pending.
     calculated_status = 'Approved' if staff_id else 'Pending' 
@@ -433,48 +433,51 @@ def delete_trek(trek_id):
 @role_required(['admin'])
 def update_trek(trek_id):
     trek = Trek.query.get(trek_id)
-
     if not trek:
         return jsonify({"msg": "Trek not found."}), 404
 
     data = request.get_json()
-
     has_bookings = len(trek.bookings) > 0
 
-    # 1. ALWAYS ALLOWED (Superficial changes)
+    # ALWAYS ALLOWED (Superficial changes)
     if 'name' in data:
         trek.name = data['name']
     if 'difficulty' in data:
         trek.difficulty = data['difficulty']
 
-    # 2. CONDITIONAL CHANGES (Core details)
-    # Check if the admin is trying to change a restricted field
+    # CONDITIONAL CHANGES (Core details)
     restricted_fields = ['location', 'duration', 'start_date', 'end_date']
     attempting_restricted_update = any(field in data for field in restricted_fields)
 
     if has_bookings and attempting_restricted_update:
         return jsonify({
-            "msg": "Action Denied: You cannot change the location or dates of this trek because users have already booked it. You may only fix typos in the name or difficulty."
+            "msg": "Action Denied: You cannot change location or dates for booked treks."
         }), 400
 
-    # if there are no booking, apply the core change
     if not has_bookings:
         if 'location' in data:
             trek.location = data['location']
         if 'duration' in data:
             trek.duration = data['duration']
-
         try:
             if 'start_date' in data:
                 trek.start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
             if 'end_date' in data:
                 trek.end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
         except ValueError:
-            return jsonify({"msg": "Invalid date format. Please use YYYY-MM-DD"}), 400
+            return jsonify({"msg": "Invalid date format."}), 400
 
-        
+    try:
         db.session.commit()
         cache.clear()
+
+        # Update all dashboards
+        sse.publish({"trek_id": trek.id}, type="admin_dashboard_update")
+        sse.publish({"trek_id": trek.id}, type="marketplace_update")
+        sse.publish({"trek_id": trek.id}, type="staff_alert_all")
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"msg": "Database error occurred."}), 500
     
     return jsonify({
         "msg": f"Trek '{trek.name}' updated successfully.",
@@ -492,10 +495,10 @@ def emergency_cancel_trek(trek_id):
     if trek.status == 'Canceled':
         return jsonify({"msg": "This trek is already canceled."}), 400
 
-    # 1. Change the status
+    # Change the status
     trek.status = 'Canceled'
 
-    # 2. Free up the Staff Member!
+    # Free up the Staff Member!
     # By setting this to None, Rohit's 10-day buffer is instantly cleared for these dates.
     freed_staff = trek.assigned_staff_id
     trek.assigned_staff_id = None
@@ -520,27 +523,28 @@ def emergency_cancel_trek(trek_id):
 
 @app.route('/admin/available-staff', methods=['GET'])
 @role_required(['admin'])
-def get_available_staff():
-    # 1. Grab dates from the URL query parameters
+def get_available_staff():   # This route for finding available staff so that admin can
+                             # assing staff to a trek later
+    # Grab dates from the URL query parameters
     start_date_str = request.args.get('start_date')
     end_date_str = request.args.get('end_date')
     
     if not start_date_str or not end_date_str:
         return jsonify({"msg": "Missing start_date or end_date parameters"}), 400
         
-    # 2. Parse the Dates
+    # Parse the Dates
     try:
         start_d = datetime.strptime(start_date_str, '%Y-%m-%d').date()
         end_d = datetime.strptime(end_date_str, '%Y-%m-%d').date()
     except ValueError:
         return jsonify({"msg": "Invalid date format. Use YYYY-MM-DD"}), 400
         
-    # 3. Calculate the Shadow
+    # Calculate the Shadow
     buffer_days = timedelta(days=10)
     shadow_start = start_d - buffer_days
     shadow_end = end_d + buffer_days
     
-    # 4. Find the Busy Staff (The Exclusion List)
+    # Find the Busy Staff (The Exclusion List)
     overlapping_treks = Trek.query.filter(
         Trek.status != 'Cancelled',
         Trek.end_date >= shadow_start,
@@ -551,7 +555,7 @@ def get_available_staff():
     # Create a simple list of busy IDs (e.g., [2, 5, 8])
     busy_staff_ids = [trek.assigned_staff_id for trek in overlapping_treks]
     
-    # 5. Find the Available Staff
+    # Find the Available Staff
     # We query StaffProfile so we can easily return their names to the frontend
     available_staff_query = StaffProfile.query.filter(StaffProfile.status == 'Active')
     
@@ -561,7 +565,7 @@ def get_available_staff():
         
     available_staff = available_staff_query.all()
     
-    # 6. Format the Data for the Frontend Dropdown
+    # Format the Data for the Frontend Dropdown
     results = [
         {"staff_id": staff.user_id, "name": staff.name}
         for staff in available_staff
@@ -651,18 +655,18 @@ def get_all_staff():
         curr_trek_name = "None"
         up_trek_name = "None"
         
-        # 1. PREVIOUS TREKS (Ended before today)
+        # PREVIOUS TREKS (Ended before today)
         # Sort descending so the MOST RECENT previous trek is at index 0
         past_treks = sorted([t for t in assigned_treks if t.end_date < today], key=lambda x: x.end_date, reverse=True)
         if past_treks:
             prev_trek_name = past_treks[0].name
             
-        # 2. CURRENT TREKS (Today falls between start and end date)
+        # CURRENT TREKS (Today falls between start and end date)
         current_treks = [t for t in assigned_treks if t.start_date <= today <= t.end_date]
         if current_treks:
             curr_trek_name = current_treks[0].name
             
-        # 3. UPCOMING TREKS (Starts after today)
+        # UPCOMING TREKS (Starts after today)
         # Sort ascending so the SOONEST upcoming trek is at index 0
         future_treks = sorted([t for t in assigned_treks if t.start_date > today], key=lambda x: x.start_date)
         if future_treks:
@@ -813,15 +817,15 @@ def get_all_trekkers():
         curr_trek_name = "None"
         up_trek_name = "None"
         
-        # 1. PREVIOUS TREKS
+        # PREVIOUS TREKS
         past_treks = sorted([t for t in booked_treks if t.end_date < today], key=lambda x: x.end_date, reverse=True)
         if past_treks: prev_trek_name = past_treks[0].name
             
-        # 2. CURRENT TREKS
+        # CURRENT TREKS
         current_treks = [t for t in booked_treks if t.start_date <= today <= t.end_date]
         if current_treks: curr_trek_name = current_treks[0].name
             
-        # 3. UPCOMING TREKS
+        # UPCOMING TREKS
         future_treks = sorted([t for t in booked_treks if t.start_date > today], key=lambda x: x.start_date)
         if future_treks: up_trek_name = future_treks[0].name
 
@@ -845,18 +849,18 @@ def get_all_trekkers():
 @app.route('/admin/trekker/<int:user_id>/export', methods=['POST'])
 @role_required(['admin'])
 def admin_trigger_csv_export(user_id):
-    # 1. Verify the target is actually a trekker
+    # Verify the target is actually a trekker
     target_user = User.query.get(user_id)
     if not target_user or target_user.role != 'trekker':
         return jsonify({"msg": "Trekker not found."}), 404
 
-    # 2. Import the task INSIDE the route to avoid circular imports
+    # Import the task INSIDE the route to avoid circular imports
     from tasks import export_booking_history_csv
 
-    # 3. Pin the ticket to the Celery board!
+    # Pin the ticket to the Celery board!
     export_booking_history_csv.delay(user_id, is_admin=True)
 
-    # 4. Immediately return to the Admin without freezing the dashboard
+    # Immediately return to the Admin without freezing the dashboard
     return jsonify({
         "msg": f"CSV export for Trekker #{user_id} has started in the background! The report will be emailed shortly.",
         "status": "processing"
@@ -934,10 +938,10 @@ def get_trekker_profile():
 @app.route('/trekker/profile', methods=['PUT'])
 @role_required(['trekker'])
 def update_trekker_profile():
-    # 1. Identify the Trekker
+    # Identify the Trekker
     user_id = int(get_jwt_identity())
     
-    # 2. Fetch their specific profile using the linked user_id
+    # Fetch their specific profile using the linked user_id
     profile = TrekkerProfile.query.filter_by(user_id=user_id).first()
     
     if not profile:
@@ -954,9 +958,11 @@ def update_trekker_profile():
     if 'emergency_contact' in data:
         profile.emergency_contact = data['emergency_contact']
         
-    # 4. Save Changes
+    # Save Changes
     try:
         db.session.commit()
+
+        cache.clear()
 
         # --- INSTANT SSE BROADCAST ---
         sse.publish(
@@ -965,6 +971,10 @@ def update_trekker_profile():
             },
             type="admin_dashboard_update"
         )
+
+        # SSE Brodcast for staff dashboard
+        # Tell the Staff dashboards to refresh their open modals!
+        sse.publish({"message": "sync"}, type="global_roster_update")
 
     except Exception as e:
         db.session.rollback()
@@ -980,7 +990,6 @@ def update_trekker_profile():
 @cache.cached(timeout=60, query_string=True)
             # <-- Caches the specific search for 60 seconds
             # By setting query_string=True, 
-            # Redis is smart enough to save a different copy for every unique search filter!
 def view_open_treks():
     search_location = request.args.get('location')
     search_difficulty = request.args.get('difficulty')
@@ -1048,19 +1057,19 @@ def book_trek():
     if target_trek.available_slots <= 0:
         return jsonify({"msg": "Sorry, this trek is fully booked!"}), 400
         
-    # ==========================================
+    # =============================
     # Prevent Double Booking
-    # ==========================================
-    # FIX: We explicitly filter for 'Confirmed' bookings.
+    # ===================   ======
+    # We explicitly filter for 'Confirmed' bookings.
     # If they only have a 'Cancelled' booking for this trek, this returns None, allowing them to re-book!
     existing_booking = Booking.query.filter_by(user_id=user_id, trek_id=trek_id, status='Confirmed').first()
     if existing_booking:
         return jsonify({"msg": "You have already booked an active ticket for this trek!"}), 409
         
-    # ==========================================
+    # ====================================
     # Prevent Overlapping Dates
-    # ==========================================
-    # FIX: We add `Booking.status == 'Confirmed'` to the database query itself.
+    # ======   ========= ==========
+    # We add `Booking.status == 'Confirmed'` to the database query itself.
     # This guarantees cancelled treks are completely ignored when checking for calendar overlaps.
     overlapping_trek = Trek.query.join(Booking).filter(
         Booking.user_id == user_id,
@@ -1074,9 +1083,9 @@ def book_trek():
             "msg": f"Date overlap! You are already booked for '{overlapping_trek.name}' from {overlapping_trek.start_date} to {overlapping_trek.end_date}."
         }), 409
 
-    # ==========================================
+    # ================
     # Execute the Transaction
-    # ==========================================
+    # ===================   =
     new_booking = Booking(user_id=user_id, trek_id=trek_id, status='Confirmed')
     
     # Inventory Management: Decrease available slots by 1
@@ -1112,6 +1121,9 @@ def book_trek():
                 type=f"staff_alert_{target_trek.assigned_staff_id}"
             )
 
+        # ---- SSE BROADCAST FOR MARKETPLACE TREKKER----
+        sse.publish({"message": "sync"}, type="marketplace_update")
+
     except Exception as e:
         db.session.rollback()
         return jsonify({"msg": "A database error occurred during booking."}), 500
@@ -1131,7 +1143,7 @@ def get_my_booking():
 
     results = []
     for booking in my_bookings:
-        # Thanks to the 'backref' in models.py, we can just say booking.trek!
+        # look at  'backref' in models.py, we can just say booking.trek!
         trek  = booking.trek
 
         results.append({
@@ -1191,6 +1203,9 @@ def cancel_booking(booking_id):
             type="admin_dashboard_update"
         )
 
+        # ---- SSE BROADCAST FOR MARKETPLACE TREKKER----
+        sse.publish({"message": "sync"}, type="marketplace_update")
+
     except Exception as e:
         db.session.rollback()
         return jsonify({"msg": "Database error occured during cancellation."}), 500
@@ -1207,7 +1222,7 @@ def cancel_booking(booking_id):
 def trigger_csv_export():
     user_id = int(get_jwt_identity())
 
-    # 2. Import the task INSIDE the route 
+    # Import the task INSIDE the route 
     # (Doing this at the top of the file would cause a circular import error!)
     from tasks import export_booking_history_csv
 
@@ -1258,9 +1273,26 @@ def get_trekker_exports():
     
     return jsonify({"exports": exports}), 200
 
-# ==========================================
-# STAFF ROUTES (Phase 6)
-# ==========================================
+# ==================
+# STAFF ROUTES 
+# =========
+@app.route('/staff/profile', methods=['GET'])
+@role_required(['staff'])
+def get_staff_profile():
+    user_id = int(get_jwt_identity())
+    user = User.query.get(user_id)
+
+    if not user or not user.staff_profile:
+        return jsonify({"msg": "Profile not found"}), 404
+
+    profile = user.staff_profile
+
+    return jsonify({
+        "email": user.email,
+        "name": profile.name,
+        "contact_details": profile.contact_details
+    }), 200
+
 
 @app.route('/staff/profile', methods=['PUT'])
 @role_required(['staff'])
@@ -1328,32 +1360,37 @@ def update_trek_status(trek_id):
     data = request.get_json()
     new_status = data.get('status')
     
-    # 1. Validate Input
+    # Validate Input
     # Staff shouldn't be able to revert a trek to "Pending" (that means no staff is assigned)
     allowed_statuses = ['Approved', 'Open', 'Closed', 'Completed']
     if not new_status or new_status not in allowed_statuses:
         return jsonify({"msg": f"Invalid status. Must be one of: {allowed_statuses}"}), 400
         
-    # 2. Identify the Staff Member
+    # Identify the Staff Member
     staff_id = int(get_jwt_identity())
     
-    # 3. Find the Trek
+    # Find the Trek
     trek = Trek.query.get(trek_id)
     if not trek:
         return jsonify({"msg": "Trek not found"}), 404
         
-    # ==========================================
-    # 4. THE SECURITY FORTRESS (Ownership Check)
-    # ==========================================
+    # =================  ==
+    # Ownership Check
+    # ================
     if trek.assigned_staff_id != staff_id:
         return jsonify({"msg": "Unauthorized: You do not have permission to modify this trek."}), 403
         
-    # 5. Update and Save
+    # Update and Save
     trek.status = new_status
     
     try:
         db.session.commit()
         cache.clear()
+
+        # --- INSTANT SSE BROADCAST ---
+        sse.publish({"trek_id": trek.id}, type="marketplace_update")
+        sse.publish({"trek_id": trek.id}, type="admin_dashboard_update")
+
     except Exception as e:
         db.session.rollback()
         return jsonify({"msg": "Database error occurred."}), 500
@@ -1388,6 +1425,11 @@ def update_trek_slot(trek_id):
     try:
         db.session.commit()
         cache.clear()
+
+        # --- INSTANT SSE BROADCAST ---
+        sse.publish({"trek_id": trek.id}, type="marketplace_update")
+        sse.publish({"trek_id": trek.id}, type="admin_dashboard_update")
+
     except Exception as e:
         db.session.rollback()
         return jsonify({"msg": "Database error occured."}), 500
@@ -1434,9 +1476,9 @@ def get_trek_participants(trek_id):
         "participants": participants
     }), 200
 
-# ==========================================
-#  SSE BLUEPRINT (Phase 8 - Radio Tower)
-# ==========================================
+# =====================
+#  SSE BLUEPRINT (Radio Tower)
+# ===============================
 app.register_blueprint(sse, url_prefix='/stream')
 
 # Start the local development server

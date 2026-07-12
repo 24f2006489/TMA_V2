@@ -12,28 +12,28 @@ from flask_sse import sse
 # Python function into a "Background Task" that Redis can queue.
 @celery_app.task
 def export_booking_history_csv(user_id, is_admin=False):
-    # 1. We add an artificial 5-second delay to simulate heavy processing.
+    # We add an artificial 5-second delay to simulate heavy processing.
     # This proves that Flask won't freeze while this is running!
     print(f"Chef is starting the CSV export for User {user_id}...")
     time.sleep(5) 
 
-    # 2. Fetch the user and their bookings
+    # Fetch the user and their bookings
     user = User.query.get(user_id)
     if not user:
         return "Error: User not found."
 
     bookings = Booking.query.filter_by(user_id=user_id).all()
 
-    # 3. Setup a dedicated 'exports' folder inside a 'static' directory
+    # Setup a dedicated 'exports' folder inside a 'static' directory
     # os.makedirs ensures the folder is created if it doesn't exist yet
     export_dir = os.path.join('static', 'exports')
     os.makedirs(export_dir, exist_ok=True)
     
-    # 4. Generate a unique filename using a timestamp so files don't overwrite each other
+    # Generate a unique filename using a timestamp so files don't overwrite each other
     filename = f"booking_history_user_{user_id}_{int(time.time())}.csv"
     filepath = os.path.join(export_dir, filename)
 
-    # 5. Build the CSV File
+    # Build the CSV File
     with open(filepath, mode='w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
         
@@ -72,9 +72,9 @@ def export_booking_history_csv(user_id, is_admin=False):
     print(f"Chef finished! File saved as {filename}. Table refresh ping sent!")
     return filepath_url
 
-# ==========================================
+# ===========  =========
 #  CORE EMAIL FUNCTION
-# ==========================================
+# ========================
 
 def send_email(to_address, subject, message, content_type="plain"):
     msg = MIMEMultipart()
@@ -95,9 +95,9 @@ def send_email(to_address, subject, message, content_type="plain"):
     except Exception as e:
         print(f"❌ Failed to connect to MailHog. Is it running? Error: {e}")
 
-# ==========================================
+# ============  ==============
 #  SCHEDULED TASKS (Celery Beat)
-# ==========================================
+# ===== ========  ===========  ========
 
 @celery_app.task
 def send_daily_reminders():

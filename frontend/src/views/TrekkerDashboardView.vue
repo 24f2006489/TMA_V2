@@ -164,7 +164,7 @@ const handleExportHistory = async () => {
 // =============
 const exportList = ref([])
 let sseConnection = null
-let fallbackRadar = null // NEW: The backup polling interval
+let fallbackRadar = null // The backup polling interval
 
 const fetchExports = async () => {
     try {
@@ -192,6 +192,15 @@ const setupPersonalRadio = () => {
         fetchExports() 
     })
 
+    // Listen for Global Marketplace Updates!
+    sseConnection.addEventListener('marketplace_update', (event) => {
+        console.log("🌍 Global Inventory Shift Detected! Syncing Marketplace...")
+        // If the user is currently looking at the marketplace, refresh the data seamlessly
+        if (currentTab.value === 'marketplace') {
+            fetchMarketplace()
+        }
+    })
+
     // Graceful Degradation (Exactly like Admin Dashboard)
     sseConnection.onerror = (err) => {
         console.warn("⚠️ Radio signal dropped. Switching to Radar Sweep (Polling Backup)...")
@@ -203,6 +212,7 @@ const setupPersonalRadio = () => {
         if (!fallbackRadar) {
             fallbackRadar = setInterval(() => {
                 fetchExports()
+                if (currentTab.value === 'marketplace') fetchMarketplace()
             }, 3000)
         }
     }
@@ -238,7 +248,7 @@ onUnmounted(() => {
             <div class="d-flex justify-content-between align-items-center mb-4 p-3 neo-panel">
                 <h2 class="mb-0 text-dark">Trekker Basecamp</h2>
                 <div class="d-flex align-items-center gap-3">
-                    <span class="fw-bold text-secondary">Welcome, Explorer!</span>
+                    <span class="fw-bold text-secondary">Welcome, {{ userProfile.name }}</span>
                     <button class="btn btn-outline-danger" @click="handleLogout">Logout</button>
                 </div>
             </div>
@@ -428,12 +438,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-/* ========================================
-    TREKKER THEME TOKENS
-    A sage / forest palette — deliberately different from the Admin
-    Dashboard's blue-violet theme, so the two dashboards read as
-    distinct products rather than reskins of each other.
-======================================== */
+
 .dashboard-bg {
     --accent: #3f6d52;
     --accent-dark: #2f5940;
@@ -448,10 +453,7 @@ onUnmounted(() => {
        of the screen, even if there isn't much content on the page. */
 }
 
-/* ========================================
-   NEO-PANEL (The Floating Card)
-   Solid, opaque surface so it visibly separates from the desk.
-======================================== */
+
 .neo-panel {
     background: #f6f7f1;
     border: 1px solid rgba(255, 255, 255, 0.9);
@@ -470,11 +472,7 @@ onUnmounted(() => {
     box-shadow: inset 5px 5px 10px var(--shadow-dark), inset -5px -5px 10px var(--shadow-light);
 }
 
-/* ========================================
-   LEDGER TABLE (My Expeditions)
-   Carved INTO the panel it sits inside (inset shadow), rather than
-   floating above it — this reads as "embedded", not as a separate card.
-======================================== */
+
 .ledger-card {
     background: #eef1e7;
     border-radius: 14px;
@@ -534,11 +532,7 @@ onUnmounted(() => {
     color: #c0392b;
 }
 
-/* ========================================
-   ACCENT BUTTONS
-   Overrides Bootstrap's default blue so primary actions pick up the
-   Trekker theme's forest-green accent instead of matching Admin's blue.
-======================================== */
+
 .btn-primary {
     background-color: var(--accent);
     border-color: var(--accent);
@@ -559,11 +553,7 @@ onUnmounted(() => {
     color: #fff;
 }
 
-/* ========================================
-   PROFILE SECTION CARDS
-   Elevated white cards (same language as .trek-card) rather than the
-   old hard 2px borders, so Account Settings matches the rest of the app.
-======================================== */
+
 .profile-card {
     background: #ffffff;
     border-radius: 14px;

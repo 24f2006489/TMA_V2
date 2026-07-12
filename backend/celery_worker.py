@@ -2,7 +2,7 @@ from celery import Celery, Task
 from celery.schedules import crontab
 from app import app
 
-# 1. Initialize the celety app
+# Initialize the celety app
 
 celery_app = Celery(
     'tasks',
@@ -12,9 +12,9 @@ celery_app = Celery(
 )
 
 
-# ======================
+# ==================
 # CELERY BEAT SCHEDULE
-# ======================
+# ============
 
 celery_app.conf.timezone = 'Asia/Kolkata'
 
